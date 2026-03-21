@@ -1,0 +1,1 @@
+"""Low-level helpers shared by the angular and projected subpackages."""

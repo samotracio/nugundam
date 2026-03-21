@@ -1,0 +1,14 @@
+.ipynb_checkpoints
+.virtual_documents
+__pycache__
+build
+dist
+nugundam.egg-info
+xxx*.*
+_cflibfor*.so
+_cflibfor*.pyd
+*-f2pywrappers*.f90
+*module.c
+*.mod
+*.o
+*.obj
