@@ -1,4 +1,4 @@
-# nuGUNDAM
+# <img src="./docs/images/banner.png">
 
 nuGUNDAM is a package for fast two-point correlation functions in galaxy surveys.
 
