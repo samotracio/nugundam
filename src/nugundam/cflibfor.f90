@@ -2113,7 +2113,7 @@ do iq1=1,nc1
 end do
 !$omp end parallel do
 close(11)  ! close log
-write(*,*) ' '
+if(len_trim(progressf)==0) write(*,*) ' '
 end subroutine rppi_A
 
 
@@ -2307,7 +2307,7 @@ do iq1=1,nc1
 end do
 !$omp end parallel do
 close(11)  ! close log
-write(*,*) ' '
+if(len_trim(progressf)==0) write(*,*) ' '
 end subroutine rppi_A_wg
 
 
@@ -2503,7 +2503,7 @@ do iq1=1,nc1
 end do
 !$omp end parallel do
 close(11)  ! close log
-write(*,*) ' '
+if(len_trim(progressf)==0) write(*,*) ' '
 end subroutine rppi_Ab
 
 
@@ -2708,7 +2708,7 @@ do iq1=1,nc1
 end do
 !$omp end parallel do
 close(11)  ! close log
-write(*,*) ' '
+if(len_trim(progressf)==0) write(*,*) ' '
 end subroutine rppi_Ab_wg
 
 
@@ -2894,7 +2894,7 @@ do i=1,npt   !---- Loop over ith particles ----
 end do
 !$omp end parallel do
 close(11)  ! close log
-write(*,*) ' '
+if(len_trim(progressf)==0) write(*,*) ' '
 end subroutine rppi_C
 
 
@@ -3090,7 +3090,7 @@ do i=1,npt   !---- Loop over ith particles ----
 end do
 !$omp end parallel do
 close(11)  ! close log
-write(*,*) ' '
+if(len_trim(progressf)==0) write(*,*) ' '
 end subroutine rppi_C_wg
 
 
@@ -3289,7 +3289,7 @@ do i=1,npt   !---- Loop over ith particles ----
 end do
 !$omp end parallel do
 close(11)  ! close log
-write(*,*) ' '
+if(len_trim(progressf)==0) write(*,*) ' '
 end subroutine rppi_Cb
 
 
@@ -3500,7 +3500,7 @@ do i=1,npt   !---- Loop over ith particles ----
 end do
 !$omp end parallel do
 close(11)  ! close log
-write(*,*) ' '
+if(len_trim(progressf)==0) write(*,*) ' '
 end subroutine rppi_Cb_wg
 
 
@@ -3861,7 +3861,7 @@ do i=1,npt
 end do
 !$omp end parallel do
 close(11)
-write(*,*) ' '
+if(len_trim(progressf)==0) write(*,*) ' '
 end subroutine th_Cjk
 
 subroutine th_Cjk_wg(nt,npt,ra,dec,wei,x,y,z,reg,npt1,wei1,x1,y1,z1,reg1,nreg, &
@@ -3988,7 +3988,7 @@ do i=1,npt
 end do
 !$omp end parallel do
 close(11)
-write(*,*) ' '
+if(len_trim(progressf)==0) write(*,*) ' '
 end subroutine th_Cjk_wg
 
 
@@ -4121,7 +4121,7 @@ do iq1=1,nc1
 end do
 !$omp end parallel do
 close(11)
-write(*,*) ' '
+if(len_trim(progressf)==0) write(*,*) ' '
 end subroutine rppi_Ajk
 
 
@@ -4261,7 +4261,7 @@ do iq1=1,nc1
 end do
 !$omp end parallel do
 close(11)
-write(*,*) ' '
+if(len_trim(progressf)==0) write(*,*) ' '
 end subroutine rppi_Ajk_wg
 
 subroutine rppi_Cjk(nt,npt,ra,dec,dc,x,y,z,reg,npt1,dc1,x1,y1,z1,reg1, &
@@ -4386,7 +4386,7 @@ do i=1,npt
 end do
 !$omp end parallel do
 close(11)
-write(*,*) ' '
+if(len_trim(progressf)==0) write(*,*) ' '
 end subroutine rppi_Cjk
 
 subroutine rppi_Cjk_wg(nt,npt,ra,dec,dc,wei,x,y,z,reg,npt1,dc1,wei1,x1,y1,z1,reg1, &
@@ -4518,7 +4518,7 @@ do i=1,npt
 end do
 !$omp end parallel do
 close(11)
-write(*,*) ' '
+if(len_trim(progressf)==0) write(*,*) ' '
 end subroutine rppi_Cjk_wg
 
 end module mod

@@ -196,3 +196,19 @@ def test_pcf_passes_progress_file(monkeypatch, rp_pi_grid, tmp_path):
     cfg.progress.progress_file = str(progress_path)
     projected_api.pcf(object(), object(), cfg)
     assert captured['progress_file'] == str(progress_path)
+
+
+def test_fortran_progress_blank_lines_are_guarded():
+    src = Path(__file__).resolve().parents[1] / "src" / "nugundam" / "cflibfor.f90"
+    lines = src.read_text(encoding="utf-8").splitlines()
+    offenders = []
+    for i, line in enumerate(lines, start=1):
+        if "write(*,*) ' '" not in line:
+            continue
+        if "if(len_trim(progressf)==0)" in line:
+            continue
+        prev = lines[i - 2].strip() if i >= 2 else ""
+        if prev.startswith("else"):
+            continue
+        offenders.append((i, line.strip()))
+    assert offenders == []

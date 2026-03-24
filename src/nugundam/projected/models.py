@@ -5,11 +5,16 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from ..core.common import makebins
+
 from ..angular.models import (
     BootstrapSpec,
     JackknifeSpec,
     CatalogColumns,
+    ConfigDescription,
     ConfigDocMixin,
+    _fmt_bin_value,
+    _format_bin_table,
     Estimator,
     ProgressSpec,
     ResultIOMixin,
@@ -35,21 +40,271 @@ class ProjectedCatalogColumns(ConfigDocMixin):
     region: str | None = field(default=None, metadata={"doc": "Optional jackknife-region column name."})
 
 
-@dataclass(slots=True)
+@dataclass(init=False, slots=True)
 class ProjectedBinning(ConfigDocMixin):
-    """
-    ProjectedBinning helper or container class.
-    
-    Notes
-    -----
-    Internal helper documented for completeness.
+    """Projected-separation binning specification.
+
+    Instances are created with the explicit named constructors
+    :meth:`from_binsize` or :meth:`from_limits`. The projected separation
+    ``r_p`` supports both binsize-based and min/max-based construction, while
+    the line-of-sight separation ``pi`` keeps the existing ``(nsepv, dsepv)``
+    specification used by the projected counters.
+
+    Attributes
+    ----------
+    nsepp : int
+        Number of projected-separation bins.
+    seppmin : float
+        Lower edge of the first projected-separation bin.
+    dsepp : float
+        Linear projected-bin width or logarithmic projected-bin step, depending
+        on ``logsepp``.
+    logsepp : bool
+        If True, build logarithmically spaced ``r_p`` bins.
+    nsepv : int
+        Number of line-of-sight bins.
+    dsepv : float
+        Line-of-sight bin width in Mpc/h.
     """
     nsepp: int = field(default=20, metadata={"doc": "Number of projected-separation bins."})
-    seppmin: float = field(default=0.1, metadata={"doc": "Minimum projected separation in Mpc/h."})
-    dsepp: float = field(default=0.1, metadata={"doc": "Projected-bin width; dex when logsepp=True, otherwise linear."})
-    logsepp: bool = field(default=True, metadata={"doc": "Use logarithmic projected bins when True."})
+    seppmin: float = field(default=0.1, metadata={"doc": "Lower edge of the first projected-separation bin in Mpc/h."})
+    dsepp: float = field(default=0.1, metadata={"doc": "Resolved projected-bin width; dex when logsepp=True, otherwise linear."})
+    logsepp: bool = field(default=True, metadata={"doc": "Use logarithmic projected bins if True."})
     nsepv: int = field(default=20, metadata={"doc": "Number of line-of-sight bins."})
     dsepv: float = field(default=2.0, metadata={"doc": "Line-of-sight bin width in Mpc/h."})
+
+    def __init__(self, *args, **kwargs):
+        raise TypeError(
+            "ProjectedBinning instances must be created with ProjectedBinning.from_binsize() "
+            "or ProjectedBinning.from_limits()."
+        )
+
+    @classmethod
+    def _build(
+        cls,
+        *,
+        nsepp: int,
+        seppmin: float,
+        dsepp: float,
+        logsepp: bool,
+        nsepv: int,
+        dsepv: float,
+    ) -> "ProjectedBinning":
+        obj = cls.__new__(cls)
+        obj.nsepp = int(nsepp)
+        obj.seppmin = float(seppmin)
+        obj.dsepp = float(dsepp)
+        obj.logsepp = bool(logsepp)
+        obj.nsepv = int(nsepv)
+        obj.dsepv = float(dsepv)
+        return obj
+
+    @classmethod
+    def from_binsize(
+        cls,
+        nsepp: int = 20,
+        seppmin: float = 0.1,
+        dsepp: float = 0.1,
+        logsepp: bool = True,
+        nsepv: int = 20,
+        dsepv: float = 2.0,
+    ) -> "ProjectedBinning":
+        """Create projected bins from lower edges, counts, and bin sizes.
+
+        Parameters
+        ----------
+        nsepp : int, default=20
+            Number of projected-separation bins.
+        seppmin : float, default=0.1
+            Lower edge of the first projected-separation bin in Mpc/h.
+        dsepp : float, default=0.1
+            Projected-bin width; dex when ``logsepp=True``, otherwise linear.
+        logsepp : bool, default=True
+            If True, use logarithmic spacing for ``r_p``.
+        nsepv : int, default=20
+            Number of line-of-sight bins.
+        dsepv : float, default=2.0
+            Line-of-sight bin width in Mpc/h.
+
+        Returns
+        -------
+        ProjectedBinning
+            Binning instance with the resolved internal representation used by
+            the projected preparation and counting layer.
+        """
+        nsepp = int(nsepp)
+        seppmin = float(seppmin)
+        dsepp = float(dsepp)
+        logsepp = bool(logsepp)
+        nsepv = int(nsepv)
+        dsepv = float(dsepv)
+        if nsepp <= 0:
+            raise ValueError("nsepp must be positive.")
+        if nsepv <= 0:
+            raise ValueError("nsepv must be positive.")
+        if dsepp <= 0.0:
+            raise ValueError("dsepp must be positive.")
+        if dsepv <= 0.0:
+            raise ValueError("dsepv must be positive.")
+        if logsepp and seppmin <= 0.0:
+            raise ValueError("seppmin must be positive when logsepp=True.")
+        return cls._build(
+            nsepp=nsepp, seppmin=seppmin, dsepp=dsepp, logsepp=logsepp, nsepv=nsepv, dsepv=dsepv
+        )
+
+    @classmethod
+    def from_limits(
+        cls,
+        nsepp: int = 20,
+        seppmin: float = 0.1,
+        seppmax: float = 10.0,
+        logsepp: bool = True,
+        nsepv: int = 20,
+        dsepv: float = 2.0,
+    ) -> "ProjectedBinning":
+        """Create projected bins from projected lower and upper separation limits.
+
+        Parameters
+        ----------
+        nsepp : int, default=20
+            Number of projected-separation bins.
+        seppmin : float, default=0.1
+            Lower edge of the first projected-separation bin in Mpc/h.
+        seppmax : float, default=10.0
+            Upper edge of the last projected-separation bin in Mpc/h.
+        logsepp : bool, default=True
+            If True, use logarithmic spacing for ``r_p`` and derive ``dsepp``.
+        nsepv : int, default=20
+            Number of line-of-sight bins.
+        dsepv : float, default=2.0
+            Line-of-sight bin width in Mpc/h.
+
+        Returns
+        -------
+        ProjectedBinning
+            Binning instance whose internal projected step matches the
+            requested ``r_p`` range.
+        """
+        nsepp = int(nsepp)
+        seppmin = float(seppmin)
+        seppmax = float(seppmax)
+        logsepp = bool(logsepp)
+        nsepv = int(nsepv)
+        dsepv = float(dsepv)
+        if nsepp <= 0:
+            raise ValueError("nsepp must be positive.")
+        if nsepv <= 0:
+            raise ValueError("nsepv must be positive.")
+        if dsepv <= 0.0:
+            raise ValueError("dsepv must be positive.")
+        if logsepp:
+            if seppmin <= 0.0 or seppmax <= 0.0:
+                raise ValueError("seppmin and seppmax must be positive when logsepp=True.")
+            if seppmax <= seppmin:
+                raise ValueError("seppmax must be larger than seppmin.")
+            dsepp = np.log10(seppmax / seppmin) / float(nsepp)
+        else:
+            if seppmax <= seppmin:
+                raise ValueError("seppmax must be larger than seppmin.")
+            dsepp = (seppmax - seppmin) / float(nsepp)
+        return cls._build(
+            nsepp=nsepp, seppmin=seppmin, dsepp=dsepp, logsepp=logsepp, nsepv=nsepv, dsepv=dsepv
+        )
+
+    @property
+    def rp_edges(self) -> np.ndarray:
+        """Resolved projected-separation bin edges."""
+        return makebins(self.nsepp, self.seppmin, self.dsepp, self.logsepp)[0]
+
+    @property
+    def rp_centers(self) -> np.ndarray:
+        """Resolved projected-separation bin centers."""
+        return makebins(self.nsepp, self.seppmin, self.dsepp, self.logsepp)[1][1]
+
+    @property
+    def rp_widths(self) -> np.ndarray:
+        """Resolved projected-separation bin widths or logarithmic steps."""
+        return makebins(self.nsepp, self.seppmin, self.dsepp, self.logsepp)[1][2]
+
+    @property
+    def seppmax(self) -> float:
+        """Upper edge of the last projected-separation bin."""
+        return float(self.rp_edges[-1])
+
+    @property
+    def pi_edges(self) -> np.ndarray:
+        """Resolved line-of-sight bin edges."""
+        return makebins(self.nsepv, 0.0, self.dsepv, False)[0]
+
+    @property
+    def pi_centers(self) -> np.ndarray:
+        """Resolved line-of-sight bin centers."""
+        return makebins(self.nsepv, 0.0, self.dsepv, False)[1][1]
+
+    @property
+    def pi_widths(self) -> np.ndarray:
+        """Resolved line-of-sight bin widths."""
+        return makebins(self.nsepv, 0.0, self.dsepv, False)[1][2]
+
+    @property
+    def sepvmax(self) -> float:
+        """Upper edge of the last line-of-sight bin."""
+        return float(self.pi_edges[-1])
+
+    def table(self, axis: str = "rp") -> ConfigDescription:
+        """Return a plain-text table with the resolved projected bins.
+
+        Parameters
+        ----------
+        axis : {'rp', 'pi'}, default='rp'
+            Which bin family to render. ``'rp'`` shows projected-separation bins
+            and ``'pi'`` shows line-of-sight bins.
+
+        Returns
+        -------
+        ConfigDescription
+            Plain-text table with the left edge, right edge, center, and width
+            of each requested bin family.
+        """
+        axis_norm = str(axis).lower()
+        if axis_norm == "rp":
+            return ConfigDescription(_format_bin_table(self.rp_edges, self.rp_centers, self.rp_widths))
+        if axis_norm == "pi":
+            return ConfigDescription(_format_bin_table(self.pi_edges, self.pi_centers, self.pi_widths))
+        raise ValueError("axis must be either 'rp' or 'pi'.")
+
+    def __str__(self) -> str:
+        spacing = "log" if self.logsepp else "linear"
+        step_label = "dex" if self.logsepp else "unit"
+        return (
+            f"ProjectedBinning(rp: {spacing}, {self.nsepp} bins, seppmin={_fmt_bin_value(self.seppmin)}, "
+            f"seppmax={_fmt_bin_value(self.seppmax)}, dsepp={_fmt_bin_value(self.dsepp)} {step_label}; "
+            f"pi: {self.nsepv} bins, dsepv={_fmt_bin_value(self.dsepv)}, sepvmax={_fmt_bin_value(self.sepvmax)})"
+        )
+
+    __repr__ = __str__
+
+    @classmethod
+    def describe(cls, recursive: bool = False, _indent: int = 0) -> ConfigDescription:
+        """Build a human-readable description of the projected binning schema."""
+        prefix = " " * _indent
+        base = str(ConfigDocMixin.describe.__func__(cls, recursive=recursive, _indent=_indent))
+        extra = [
+            f"{prefix}",
+            f"{prefix}Constructors",
+            f"{prefix}------------",
+            f"{prefix}from_binsize(nsepp=20, seppmin=0.1, dsepp=0.1, logsepp=True, nsepv=20, dsepv=2.0)",
+            f"{prefix}from_limits(nsepp=20, seppmin=0.1, seppmax=10.0, logsepp=True, nsepv=20, dsepv=2.0)",
+            f"{prefix}",
+            f"{prefix}Resolved instance attributes",
+            f"{prefix}----------------------------",
+            f"{prefix}rp_edges, rp_centers, rp_widths, seppmax, pi_edges, pi_centers, pi_widths, sepvmax",
+            f"{prefix}",
+            f"{prefix}Instance helpers",
+            f"{prefix}----------------",
+            f"{prefix}table(axis='rp' or 'pi') -> plain-text table of the resolved bins",
+        ]
+        return ConfigDescription(base + "\n" + "\n".join(extra))
 
 
 @dataclass(slots=True)
@@ -96,7 +351,7 @@ class ProjectedAutoConfig(ConfigDocMixin):
     estimator: Estimator = field(default="NAT", metadata={"doc": "Projected auto-correlation estimator: 'NAT', 'DP', or 'LS'."})
     columns_data: ProjectedCatalogColumns = field(default_factory=ProjectedCatalogColumns, metadata={"doc": "Column names for the data catalog."})
     columns_random: ProjectedCatalogColumns = field(default_factory=ProjectedCatalogColumns, metadata={"doc": "Column names for the random catalog."})
-    binning: ProjectedBinning = field(default_factory=ProjectedBinning, metadata={"doc": "Projected separation binning specification."})
+    binning: ProjectedBinning = field(default_factory=ProjectedBinning.from_binsize, metadata={"doc": "Projected separation binning specification."})
     grid: ProjectedGridSpec = field(default_factory=ProjectedGridSpec, metadata={"doc": "3D grid / linked-list preparation options."})
     distance: DistanceSpec = field(default_factory=DistanceSpec, metadata={"doc": "Comoving-distance handling options."})
     weights: WeightSpec = field(default_factory=WeightSpec, metadata={"doc": "Weight handling options."})
@@ -121,7 +376,7 @@ class ProjectedCrossConfig(ConfigDocMixin):
     columns_random1: ProjectedCatalogColumns = field(default_factory=ProjectedCatalogColumns, metadata={"doc": "Column names for the first random catalog when that catalog is required by the chosen estimator."})
     columns_data2: ProjectedCatalogColumns = field(default_factory=ProjectedCatalogColumns, metadata={"doc": "Column names for the second data catalog."})
     columns_random2: ProjectedCatalogColumns = field(default_factory=ProjectedCatalogColumns, metadata={"doc": "Column names for the second random catalog when that catalog is required by the chosen estimator."})
-    binning: ProjectedBinning = field(default_factory=ProjectedBinning, metadata={"doc": "Projected separation binning specification."})
+    binning: ProjectedBinning = field(default_factory=ProjectedBinning.from_binsize, metadata={"doc": "Projected separation binning specification."})
     grid: ProjectedGridSpec = field(default_factory=ProjectedGridSpec, metadata={"doc": "3D grid / linked-list preparation options."})
     distance: DistanceSpec = field(default_factory=DistanceSpec, metadata={"doc": "Comoving-distance handling options."})
     weights: WeightSpec = field(default_factory=WeightSpec, metadata={"doc": "Weight handling options."})
@@ -142,7 +397,7 @@ class ProjectedAutoCountsConfig(ConfigDocMixin):
     projected auto-correlation pipeline.
     """
     columns: ProjectedCatalogColumns = field(default_factory=ProjectedCatalogColumns, metadata={"doc": "Column names for the input catalog used by count-only projected auto-pair runs."})
-    binning: ProjectedBinning = field(default_factory=ProjectedBinning, metadata={"doc": "Projected separation binning specification."})
+    binning: ProjectedBinning = field(default_factory=ProjectedBinning.from_binsize, metadata={"doc": "Projected separation binning specification."})
     grid: ProjectedGridSpec = field(default_factory=ProjectedGridSpec, metadata={"doc": "3D grid / linked-list preparation options."})
     distance: DistanceSpec = field(default_factory=DistanceSpec, metadata={"doc": "Comoving-distance handling options."})
     weights: WeightSpec = field(default_factory=WeightSpec, metadata={"doc": "Weight handling options."})
@@ -164,7 +419,7 @@ class ProjectedCrossCountsConfig(ConfigDocMixin):
     """
     columns1: ProjectedCatalogColumns = field(default_factory=ProjectedCatalogColumns, metadata={"doc": "Column names for the first input catalog used by count-only projected cross-pair runs."})
     columns2: ProjectedCatalogColumns = field(default_factory=ProjectedCatalogColumns, metadata={"doc": "Column names for the second input catalog used by count-only projected cross-pair runs."})
-    binning: ProjectedBinning = field(default_factory=ProjectedBinning, metadata={"doc": "Projected separation binning specification."})
+    binning: ProjectedBinning = field(default_factory=ProjectedBinning.from_binsize, metadata={"doc": "Projected separation binning specification."})
     grid: ProjectedGridSpec = field(default_factory=ProjectedGridSpec, metadata={"doc": "3D grid / linked-list preparation options."})
     distance: DistanceSpec = field(default_factory=DistanceSpec, metadata={"doc": "Comoving-distance handling options."})
     weights: WeightSpec = field(default_factory=WeightSpec, metadata={"doc": "Weight handling options."})

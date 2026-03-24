@@ -31,7 +31,7 @@ def test_config_describe_recursive_includes_nested_sections():
 
 
 def test_other_config_descriptions_are_available():
-    assert "sepmin : float = Minimum angular separation" in str(AngularBinning.describe())
+    assert "sepmin : float = Lower edge of the first angular bin" in str(AngularBinning.describe())
     cross_text = str(AngularCrossConfig.describe())
     assert "columns_data2 : CatalogColumns = Column names for the second data catalog." in cross_text
 

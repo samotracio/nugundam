@@ -389,11 +389,12 @@ def _extract_matrix_plot_spec(
     axis_label : str
         Default axis label for both matrix dimensions.
     """
-    if isinstance(obj, AngularCorrelationResult):
-        if obj.cov is None:
-            raise ValueError("AngularCorrelationResult does not contain a covariance matrix.")
-        matrix = np.asarray(obj.cov, dtype=float)
-        xvals = _as_1d_array(obj.theta_centers, name="theta_centers") * _ANGULAR_UNIT_SCALE[angunit]
+    if isinstance(obj, AngularCorrelationResult) or (hasattr(obj, "cov") and hasattr(obj, "theta_centers")):
+        cov = getattr(obj, "cov", None)
+        if cov is None:
+            raise ValueError(f"{type(obj).__name__} does not contain a covariance matrix.")
+        matrix = np.asarray(cov, dtype=float)
+        xvals = _as_1d_array(getattr(obj, "theta_centers"), name="theta_centers") * _ANGULAR_UNIT_SCALE[angunit]
         return matrix, xvals, _angular_xlabel(angunit)
     if isinstance(obj, ProjectedCorrelationResult) or (hasattr(obj, "cov") and hasattr(obj, "rp_centers")):
         cov = getattr(obj, "cov", None)
@@ -1180,6 +1181,14 @@ def _maybe_get_projected_spec(result: Any) -> tuple[np.ndarray, np.ndarray, np.n
     -----
     Internal helper used by the refactored nuGUNDAM package.
     """
+    if hasattr(result, "rp_centers") and hasattr(result, "mrp"):
+        return (
+            _as_1d_array(getattr(result, "rp_centers"), name="rp_centers"),
+            _as_1d_array(getattr(result, "mrp"), name="mrp"),
+            _as_1d_array(getattr(result, "mrp_err"), name="mrp_err") if getattr(result, "mrp_err", None) is not None else None,
+            r"$r_p\,[h^{-1}\,\mathrm{Mpc}]$",
+            r"$M(r_p)$",
+        )
     if hasattr(result, "rp_centers") and hasattr(result, "wp"):
         return (
             _as_1d_array(getattr(result, "rp_centers"), name="rp_centers"),
@@ -1222,7 +1231,13 @@ def _result_plot_spec(
     if projected is not None:
         return projected
 
-    if isinstance(result, AngularCorrelationResult):
+    if hasattr(result, "theta_centers") and hasattr(result, "mtheta"):
+        x = _as_1d_array(result.theta_centers, name="theta_centers") * _ANGULAR_UNIT_SCALE[angunit]
+        y = _as_1d_array(result.mtheta, name="mtheta")
+        yerr = _as_1d_array(result.mtheta_err, name="mtheta_err") if getattr(result, "mtheta_err", None) is not None else None
+        default_xlabel = _angular_xlabel(angunit)
+        default_ylabel = r"$M(\theta)$"
+    elif isinstance(result, AngularCorrelationResult):
         x = _as_1d_array(result.theta_centers, name="theta_centers") * _ANGULAR_UNIT_SCALE[angunit]
         y = _as_1d_array(result.wtheta, name="wtheta")
         yerr = _as_1d_array(result.wtheta_err, name="wtheta_err") if result.wtheta_err is not None else None

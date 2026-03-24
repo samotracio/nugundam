@@ -24,6 +24,8 @@ from .projected.models import (
 
 __all__ = [
     "ProjectedCatalogColumns",
+    "AutoMarkSpec",
+    "CrossMarkSpec",
     "ProjectedBinning",
     "ProjectedGridSpec",
     "SplitRandomSpec",
@@ -40,13 +42,17 @@ __all__ = [
     "ProjectedAutoCountsResult",
     "ProjectedCrossCountsResult",
     "ProjectedCorrelationResult",
+    "MarkedProjectedCorrelationResult",
     "proj_auto_counts",
     "proj_cross_counts",
     "pcf",
     "pccf",
+    "mpcf",
+    "mpccf",
     "plot_cov_matrix",
     "plot_corr_matrix",
     "plot_jk_regions",
 ]
 
 from .plotting import plot_cov_matrix, plot_corr_matrix, plot_jk_regions
+from .marked import AutoMarkSpec, CrossMarkSpec, MarkedProjectedCorrelationResult, mpcf, mpccf

@@ -26,10 +26,11 @@ from .angular.models import (
     SplitRandomSpec,
 )
 from .io import read_result, save_result, write_result
+from .marked import AutoMarkSpec, CrossMarkSpec, MarkedAngularCorrelationResult, macf, maccf
 from .plotting import plotcf, plotcf2d, plot_compare_ratio, plot_result, plot_result2d, plot_cov_matrix, plot_corr_matrix, plot_jk_regions
 
 __all__ = [
-    "AngularAutoConfig", "AngularCrossConfig", "AngularAutoCountsConfig", "AngularCrossCountsConfig", "AngularBinning", "AngularGridSpec", "WeightSpec", "BootstrapSpec", "JackknifeSpec", "ProgressSpec", "SplitRandomSpec", "CatalogColumns", "AngularAutoCounts", "AngularCrossCounts", "AngularAutoCountsResult", "AngularCrossCountsResult", "AngularCorrelationResult", "ang_auto_counts", "ang_cross_counts", "acf", "accf", "save_result", "write_result", "read_result", "plotcf", "plotcf2d", "plot_result", "plot_result2d", "plot_cov_matrix", "plot_corr_matrix", "plot_jk_regions", "plot_compare_ratio", "result_to_dict",
+    "AngularAutoConfig", "AngularCrossConfig", "AngularAutoCountsConfig", "AngularCrossCountsConfig", "AngularBinning", "AngularGridSpec", "WeightSpec", "BootstrapSpec", "JackknifeSpec", "ProgressSpec", "SplitRandomSpec", "CatalogColumns", "AutoMarkSpec", "CrossMarkSpec", "AngularAutoCounts", "AngularCrossCounts", "AngularAutoCountsResult", "AngularCrossCountsResult", "AngularCorrelationResult", "MarkedAngularCorrelationResult", "ang_auto_counts", "ang_cross_counts", "acf", "accf", "macf", "maccf", "save_result", "write_result", "read_result", "plotcf", "plotcf2d", "plot_result", "plot_result2d", "plot_cov_matrix", "plot_corr_matrix", "plot_jk_regions", "plot_compare_ratio", "result_to_dict",
 ]
 
 

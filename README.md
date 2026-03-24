@@ -2,17 +2,17 @@
 
 nuGUNDAM is a package for fast two-point correlation functions in galaxy surveys.
 
-This code uses a set of higly optimized Fortran/OpenMP counting cores, wrapped by modern, modular 
-Python layer. The current package exposes clean, typed APIs for:
+It combines highly optimized Fortran/OpenMP counting cores with a modern, modular
+Python interface. The current package exposes clean, typed APIs for:
 
 - **angular auto/cross correlations**
 - **projected auto/cross correlations**
-- pair count runs in angular and projected space
+- **marked angular/projected auto/cross correlations**
+- pair-count runs in angular and projected space
 - bootstrap and jackknife uncertainty workflows
-- support arbitrary sample weights
+- generic input tables (Astropy, pandas, PyArrow, NumPy structured arrays, mappings)
 - native result I/O, ASCII export, and plotting routines in 1D/2D
-- random split technique to accelerate RR counts with minimal effects on LS estimator
-
+- split-random acceleration for LS autocorrelations
 
 ## What is included
 
@@ -20,6 +20,8 @@ Python layer. The current package exposes clean, typed APIs for:
 
 - `acf(data, random, config)`
 - `accf(data1, data2, config, *, random1=None, random2=None)`
+- `macf(data, random, config, *, mark=...)`
+- `maccf(data1, data2, config, *, mark=..., random1=None, random2=None)`
 - `ang_auto_counts(data, config)`
 - `ang_cross_counts(data1, data2, config)`
 
@@ -27,8 +29,45 @@ Python layer. The current package exposes clean, typed APIs for:
 
 - `pcf(data, random, config)`
 - `pccf(data1, data2, config, *, random1=None, random2=None)`
+- `mpcf(data, random, config, *, mark=...)`
+- `mpccf(data1, data2, config, *, mark=..., random1=None, random2=None)`
 - `proj_auto_counts(data, config)`
 - `proj_cross_counts(data1, data2, config)`
+
+### Marked-correlation API
+
+Marked correlations are implemented as a thin layer on top of the existing weighted
+correlation machinery. nuGUNDAM runs:
+
+1. an ordinary unweighted branch, and
+2. a mark-weighted branch where the data objects carry the processed mark values,
+
+then combines both into the final marked statistic.
+
+The public mark specification objects are:
+
+- `AutoMarkSpec`
+- `CrossMarkSpec`
+
+The public marked result classes are:
+
+- `MarkedAngularCorrelationResult`
+- `MarkedProjectedCorrelationResult`
+
+For angular auto-correlations, the default marked statistic is
+
+\[
+M(\theta)=\frac{1+w_{\mathrm{marked}}(\theta)}{1+w(\theta)}.
+\]
+
+For projected auto-correlations, the default marked statistic is
+
+\[
+M(r_p)=\frac{1+w_{p,\mathrm{marked}}(r_p)/r_p}{1+w_p(r_p)/r_p}.
+\]
+
+Only the **data sample** needs a mark column. **Random catalogs remain unweighted**,
+as their role is to encode the survey geometry and selection function.
 
 ### Estimators
 
@@ -45,11 +84,15 @@ Currently implemented for both angular and projected auto/cross workflows:
   - `read_result`
 - instance methods on result/count objects:
   - `.write(...)`
+  - `.save(...)`
   - `.to_ascii(...)`
   - `.plot(...)`
   - `.plot2d(...)` for projected 2D views
   - `.plot_cov_matrix(...)`
   - `.plot_corr_matrix(...)`
+- marked result helpers:
+  - `.plain_wtheta`, `.weighted_wtheta` on marked angular results
+  - `.plain_wp`, `.weighted_wp` on marked projected results
 
 ### Plotting routines
 
@@ -107,7 +150,7 @@ NumPy arrays to the compiled counters.
 
 ## Public configuration objects
 
-nuGUNDAM uses dataclass-based configs to handle the various parameters and options
+nuGUNDAM uses dataclass-based configs to handle the various parameters and options.
 
 Angular:
 
@@ -135,6 +178,11 @@ Projected:
 - `ProjectedAutoCountsConfig`
 - `ProjectedCrossCountsConfig`
 
+Marked correlations:
+
+- `AutoMarkSpec`
+- `CrossMarkSpec`
+
 A convenient way to inspect config schemas is:
 
 ```python
@@ -145,6 +193,92 @@ ProjectedAutoConfig.describe(recursive=True)
 ```
 
 This prints a readable summary of nested options and defaults.
+
+For the binning classes themselves, `AngularBinning.describe()` and
+`ProjectedBinning.describe()` document the available named constructors and the
+resolved inspection helpers such as `edges`, `centers`, `widths`, `sepmax`,
+`rp_edges`, and `pi_edges`.
+
+## Binning construction and inspection
+
+The binning classes support **two explicit ways** to define bins:
+
+1. **`from_binsize(...)`**: define the lower bound, number of bins, and bin size.
+2. **`from_limits(...)`**: define the lower and upper bounds, and let nuGUNDAM derive the step.
+
+This applies to both angular and projected workflows.
+
+### Angular binning from a bin size
+
+```python
+from nugundam import AngularBinning
+
+binning = AngularBinning.from_binsize(
+    nsep=21,
+    sepmin=0.000277778,
+    dsep=0.17,
+    logsep=True,
+)
+
+print(binning)
+print(binning.table())
+
+edges = binning.edges
+centers = binning.centers
+sepmax = binning.sepmax
+```
+
+### Angular binning from explicit limits
+
+```python
+from nugundam import AngularBinning
+
+binning = AngularBinning.from_limits(
+    nsep=21,
+    sepmin=0.000277778,
+    sepmax=1.0,
+    logsep=True,
+)
+```
+
+### Projected binning from a bin size
+
+```python
+from nugundam import ProjectedBinning
+
+binning = ProjectedBinning.from_binsize(
+    nsepp=16,
+    seppmin=0.1,
+    dsepp=0.15,
+    logsepp=True,
+    nsepv=20,
+    dsepv=2.0,
+)
+
+print(binning)
+print(binning.table("rp"))
+print(binning.table("pi"))
+
+rp_edges = binning.rp_edges
+pi_edges = binning.pi_edges
+seppmax = binning.seppmax
+sepvmax = binning.sepvmax
+```
+
+### Projected binning from explicit limits
+
+```python
+from nugundam import ProjectedBinning
+
+binning = ProjectedBinning.from_limits(
+    nsepp=16,
+    seppmin=0.1,
+    seppmax=10.0,
+    logsepp=True,
+    nsepv=20,
+    dsepv=2.0,
+)
+```
 
 ## Quick start: angular auto-correlation
 
@@ -163,7 +297,7 @@ cfg = AngularAutoConfig(
     estimator="LS",
     columns_data=CatalogColumns(ra="ra", dec="dec", weight="wei"),
     columns_random=CatalogColumns(ra="ra", dec="dec"),
-    binning=AngularBinning(
+    binning=AngularBinning.from_binsize(
         nsep=21,
         sepmin=0.000277778,
         dsep=0.17,
@@ -210,7 +344,7 @@ cfg = AngularCrossConfig(
     columns_random1=CatalogColumns(ra="ra_r1", dec="dec_r1"),
     columns_data2=CatalogColumns(ra="ra_qso", dec="dec_qso", weight="wei_qso"),
     columns_random2=CatalogColumns(ra="ra_r2", dec="dec_r2"),
-    binning=AngularBinning(nsep=21, sepmin=0.000277778, dsep=0.17, logsep=True),
+    binning=AngularBinning.from_binsize(nsep=21, sepmin=0.000277778, dsep=0.17, logsep=True),
     grid=AngularGridSpec(autogrid="legacy", pxorder="natural"),
     weights=WeightSpec(weight_mode="auto"),
     bootstrap=BootstrapSpec(enabled=False),
@@ -253,7 +387,7 @@ cfg = ProjectedAutoConfig(
         dec="dec",
         redshift="z",
     ),
-    binning=ProjectedBinning(
+    binning=ProjectedBinning.from_binsize(
         nsepp=16,
         seppmin=0.1,
         dsepp=0.15,
@@ -312,7 +446,7 @@ cfg = ProjectedCrossConfig(
     columns_random1=ProjectedCatalogColumns(ra="rar1", dec="decr1", redshift="zr1"),
     columns_data2=ProjectedCatalogColumns(ra="ra2", dec="dec2", redshift="z2", weight="w2"),
     columns_random2=ProjectedCatalogColumns(ra="rar2", dec="decr2", redshift="zr2"),
-    binning=ProjectedBinning(nsepp=16, seppmin=0.1, dsepp=0.15, logsepp=True, nsepv=20, dsepv=2.0),
+    binning=ProjectedBinning.from_binsize(nsepp=16, seppmin=0.1, dsepp=0.15, logsepp=True, nsepv=20, dsepv=2.0),
     grid=ProjectedGridSpec(autogrid=True, pxorder="natural"),
     distance=DistanceSpec(calcdist=True),
     weights=WeightSpec(weight_mode="auto"),
@@ -322,6 +456,102 @@ cfg = ProjectedCrossConfig(
 
 res = pccf(data1, data2, cfg, random1=random1, random2=random2)
 ```
+
+## Quick start: marked projected auto-correlation
+
+```python
+from nugundam import (
+    ProjectedAutoConfig,
+    ProjectedCatalogColumns,
+    ProjectedBinning,
+    ProjectedGridSpec,
+    DistanceSpec,
+    WeightSpec,
+    BootstrapSpec,
+    AutoMarkSpec,
+    mpcf,
+)
+
+cfg = ProjectedAutoConfig(
+    estimator="LS",
+    columns_data=ProjectedCatalogColumns(ra="ra", dec="dec", redshift="z"),
+    columns_random=ProjectedCatalogColumns(ra="ra", dec="dec", redshift="z"),
+    binning=ProjectedBinning.from_binsize(
+        nsepp=28,
+        seppmin=0.02,
+        dsepp=0.12,
+        logsepp=True,
+        nsepv=4,
+        dsepv=10.0,
+    ),
+    grid=ProjectedGridSpec(autogrid=True, pxorder="natural"),
+    weights=WeightSpec(weight_mode="unweighted"),
+    bootstrap=BootstrapSpec(enabled=True, nbts=50, bseed=12345),
+    distance=DistanceSpec(calcdist=True, h0=100.0, omegam=0.25, omegal=0.75),
+    nthreads=4,
+)
+
+mres = mpcf(
+    data,
+    random,
+    cfg,
+    mark=AutoMarkSpec(column="GMR", normalize="mean"),
+)
+```
+
+The returned object is a `MarkedProjectedCorrelationResult` with fields such as:
+
+- `rp_edges`
+- `rp_centers`
+- `mrp`
+- `mrp_err`
+- `plain`
+- `weighted`
+- `metadata`
+
+Useful convenience properties include:
+
+- `mres.plain_wp`
+- `mres.weighted_wp`
+
+The same pattern applies to `macf`, `maccf`, and `mpccf`.
+
+## Mark specifications
+
+### `AutoMarkSpec`
+
+`AutoMarkSpec` controls how a per-object mark is read and preprocessed before it
+is used as the weight in the marked branch.
+
+Main options:
+
+- `column`: data-table column containing the mark
+- `normalize`: one of `"mean"`, `"median"`, or `"none"`
+- `transform`: one of `"identity"` or `"rank"`
+- `clip`: optional `(lo, hi)` clipping interval
+- `missing`: either `"raise"` or `"drop"`
+
+Typical example:
+
+```python
+mark = AutoMarkSpec(
+    column="D4000",
+    normalize="mean",
+    transform="identity",
+    clip=None,
+    missing="raise",
+)
+```
+
+### `CrossMarkSpec`
+
+For cross-correlations, `CrossMarkSpec` lets you mark sample 1, sample 2, or both.
+
+Main options:
+
+- `column1`, `column2`
+- `mark_on`: `"data1"`, `"data2"`, or `"both"`
+- `normalize`, `transform`, `clip`, `missing`
 
 ## Count-only APIs
 
@@ -344,7 +574,7 @@ from nugundam import (
 
 cfg_dd = AngularAutoCountsConfig(
     columns=CatalogColumns(ra="ra", dec="dec", weight="wei"),
-    binning=AngularBinning(nsep=21, sepmin=0.000277778, dsep=0.17, logsep=True),
+    binning=AngularBinning.from_binsize(nsep=21, sepmin=0.000277778, dsep=0.17, logsep=True),
     grid=AngularGridSpec(autogrid="legacy", pxorder="cell-dec"),
     weights=WeightSpec(weight_mode="auto"),
     bootstrap=BootstrapSpec(enabled=False),
@@ -356,7 +586,7 @@ dd = ang_auto_counts(data, cfg_dd)
 cfg_x = AngularCrossCountsConfig(
     columns1=CatalogColumns(ra="ra1", dec="dec1", weight="w1"),
     columns2=CatalogColumns(ra="ra2", dec="dec2", weight="w2"),
-    binning=AngularBinning(nsep=21, sepmin=0.000277778, dsep=0.17, logsep=True),
+    binning=AngularBinning.from_binsize(nsep=21, sepmin=0.000277778, dsep=0.17, logsep=True),
     grid=AngularGridSpec(autogrid="legacy", pxorder="cell-dec"),
     weights=WeightSpec(weight_mode="auto"),
     bootstrap=BootstrapSpec(enabled=False),
@@ -384,7 +614,7 @@ from nugundam import (
 
 cfg_dd = ProjectedAutoCountsConfig(
     columns=ProjectedCatalogColumns(ra="ra", dec="dec", redshift="z", weight="wei"),
-    binning=ProjectedBinning(nsepp=16, seppmin=0.1, dsepp=0.15, logsepp=True, nsepv=20, dsepv=2.0),
+    binning=ProjectedBinning.from_binsize(nsepp=16, seppmin=0.1, dsepp=0.15, logsepp=True, nsepv=20, dsepv=2.0),
     grid=ProjectedGridSpec(autogrid=True, pxorder="natural"),
     distance=DistanceSpec(calcdist=True),
     weights=WeightSpec(weight_mode="auto"),
@@ -411,6 +641,10 @@ The current weighting model is:
 
 `"auto"` uses a slightly faster unweighted counter when all relevant weights are unity.
 
+For marked correlations, the wrapper manages the weighted branch internally, so the
+mark itself should be passed through `AutoMarkSpec` or `CrossMarkSpec`, not through the
+regular `weight=` column definition.
+
 ## Bootstrap and jackknife
 
 ### Bootstrap
@@ -427,6 +661,10 @@ Key options live in `BootstrapSpec`:
 
 Cross-correlation bootstrap defaults to a primary-sample scheme.
 
+For marked correlations, nuGUNDAM computes the marked bootstrap realizations from
+**matched plain and weighted resamples**, rather than combining already-compressed
+error bars afterward.
+
 ### Jackknife
 
 Jackknife is currently supported for the full correlation APIs:
@@ -435,12 +673,19 @@ Jackknife is currently supported for the full correlation APIs:
 - `accf`
 - `pcf`
 - `pccf`
+- `macf`
+- `maccf`
+- `mpcf`
+- `mpccf`
 
-If no explicit region column is supplied, the package can generate sky regions automatically using a k-means-based partitioner. Jackknife-aware results can carry:
+If no explicit region column is supplied, the package can generate sky regions
+automatically using a k-means-based partitioner. Jackknife-aware results can carry:
 
 - covariance matrices
 - leave-one-region-out realizations
 - metadata describing the region source and fast-path usage
+
+Marked jackknife covariances are built from matched marked realizations.
 
 ## Jackknife plotting routines
 
@@ -465,7 +710,11 @@ ax = plot_jk_regions(data=data, random=random, config=cfg, catalog="data")
 
 ## Split-random RR acceleration
 
-nuGUNDAM includes split-random support for the LS estimator in autocorrelation in both angular and projected space. This feature is configured through `SplitRandomSpec` and is intended to reduce the cost of the RR term by splitting the random catalog into shuffled chunks, counted RR pairs in each, acummulate and properly normalize these counts before combining into the total estimation. 
+nuGUNDAM includes split-random support for the LS estimator in autocorrelation in both
+angular and projected space. This feature is configured through `SplitRandomSpec` and
+is intended to reduce the cost of the RR term by splitting the random catalog into
+shuffled chunks, counting RR pairs in each, accumulating and properly normalizing these
+counts before combining them into the total estimator.
 
 Modes:
 
@@ -485,7 +734,9 @@ cfg.split_random = SplitRandomSpec(
 )
 ```
 
-By default, split-random operates in `match_data` mode, creating as many RR chunks as needed, each roughly of the size of the data sample. Note, split-random is not available together with the jackknife feature.- 
+By default, split-random operates in `match_data` mode, creating as many RR chunks as
+needed, each roughly the size of the data sample. Split-random is not available together
+with jackknife.
 
 ## Grid selection and preparatory ordering
 
@@ -579,6 +830,8 @@ Round-tripped results preserve:
 - original run configuration
 - provenance information
 
+This includes marked result classes and their nested plain/weighted branches.
+
 ## ASCII export
 
 Result and count objects can be exported to plain ASCII:
@@ -587,7 +840,8 @@ Result and count objects can be exported to plain ASCII:
 res.to_ascii("acf.txt")
 ```
 
-The default exported columns are chosen from the object type and estimator. To control which columns will get export, customize the `cols` keyword:
+The default exported columns are chosen from the object type and estimator. To control
+which columns are exported, customize the `cols` keyword:
 
 ```python
 res.to_ascii(
@@ -596,21 +850,25 @@ res.to_ascii(
 )
 ```
 
+Marked results can likewise be exported with their default marked columns or with an
+explicit custom column list.
+
 ## Plotting
 
 ### 1D plotting from result objects
 
-The result object can be plotted directly using its attached `plot()` method either to as a new figure or inserted into a pre-existing axis:
+Result objects can be plotted directly using their attached `plot()` method, either on a
+new figure or inserted into a pre-existing axis:
 
 ```python
-res.plot(color='r', label="sample A", errors="bar")
+res.plot(color="r", label="sample A", errors="bar")
 ```
 
 ```python
 import matplotlib.pyplot as plt
 
 fig, ax = plt.subplots()
-res.plot(ax=ax, color='r', label="sample A", errors="bar")
+res.plot(ax=ax, color="r", label="sample A", errors="bar")
 ax.legend()
 ```
 
@@ -619,6 +877,12 @@ Supported uncertainty styles:
 - `errors="bar"`
 - `errors="band"`
 - `errors="none"`
+
+Marked results follow the same interface:
+
+```python
+mres.plot(label="marked", errors="bar")
+```
 
 ### 1D plotting from raw arrays
 
@@ -642,20 +906,22 @@ ax.legend()
 
 ### Projected 2D plotting
 
-Projected results and projected count objects can be visualized in 2D. They have options to overlay contours and smooth the resulting map:
+Projected results and projected count objects can be visualized in 2D. They have options
+to overlay contours and smooth the resulting map:
 
 ```python
 ax = res.plot2d(which="xi")
 ```
 
-Low-level auxiliar functions are also available:
+Low-level auxiliary functions are also available:
 
 - `plotcf2d`
 - `plot_result2d`
 
 ### Ratio comparison plotting
 
-The function `plot_compare_ratio` builds a two-panel comparison plot with shared axes, which support several correlation curves on top and multiple curve ratios below.
+The function `plot_compare_ratio` builds a two-panel comparison plot with shared axes,
+which supports several correlation curves on top and multiple curve ratios below.
 
 ## Package layout
 
@@ -669,8 +935,8 @@ src/nugundam/
 ├── plotting.py
 ├── angular_public.py
 ├── projected_public.py
+├── marked.py
 ├── result_meta.py
 ├── cflibfor.f90
 └── cflibfor.pyf
 ```
-

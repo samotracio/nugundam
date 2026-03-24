@@ -7,6 +7,8 @@ from typing import Literal, Union, get_args, get_origin, get_type_hints
 
 import numpy as np
 
+from ..core.common import makebins
+
 
 @dataclass(frozen=True, slots=True)
 class ConfigDescription:
@@ -223,6 +225,22 @@ def _unwrap_config_dataclass_type(tp):
         return args[0]
     return None
 
+def _fmt_bin_value(value: float) -> str:
+    """Format bin values compactly for summaries and text tables."""
+    return f"{float(value):.6g}"
+
+
+def _format_bin_table(edges: np.ndarray, centers: np.ndarray, widths: np.ndarray) -> str:
+    """Render a simple plain-text bin table."""
+    lines = [" i        left        right       center       width"]
+    for i, (left, right, center, width) in enumerate(zip(edges[:-1], edges[1:], centers, widths)):
+        lines.append(
+            f"{i:2d}  {_fmt_bin_value(left):>10}  {_fmt_bin_value(right):>10}  "
+            f"{_fmt_bin_value(center):>10}  {_fmt_bin_value(width):>10}"
+        )
+    return "\n".join(lines)
+
+
 
 class ResultIOMixin:
     """Mixin adding I/O and plotting convenience methods to result objects.
@@ -435,9 +453,14 @@ class CatalogColumns(ConfigDocMixin):
     region: str | None = field(default=None, metadata={"doc": "Optional jackknife-region column name."})
 
 
-@dataclass(slots=True)
+@dataclass(init=False, slots=True)
 class AngularBinning(ConfigDocMixin):
     """Angular separation binning specification.
+
+    Instances are created with the explicit named constructors
+    :meth:`from_binsize` or :meth:`from_limits`. Both constructors resolve to
+    the same internal ``(nsep, sepmin, dsep, logsep)`` representation used by
+    the existing pair-counting preparation code.
 
     Attributes
     ----------
@@ -449,11 +472,179 @@ class AngularBinning(ConfigDocMixin):
         Linear bin width or logarithmic bin step, depending on ``logsep``.
     logsep : bool
         If True, build logarithmically spaced bins.
+
+    Notes
+    -----
+    Use :meth:`from_binsize` when you want to specify the bin size directly,
+    or :meth:`from_limits` when you prefer to specify the lower and upper
+    angular limits and let nuGUNDAM derive the implied step.
     """
     nsep: int = field(default=36, metadata={"doc": "Number of angular separation bins."})
-    sepmin: float = field(default=0.01, metadata={"doc": "Minimum angular separation in the native angular unit."})
-    dsep: float = field(default=0.1, metadata={"doc": "Bin width; in dex when logsep=True, otherwise linear."})
-    logsep: bool = field(default=True, metadata={"doc": "Use logarithmic separation bins if True, linear bins otherwise."})
+    sepmin: float = field(default=0.01, metadata={"doc": "Lower edge of the first angular bin in the native angular unit."})
+    dsep: float = field(default=0.1, metadata={"doc": "Resolved bin width; in dex when logsep=True, otherwise linear."})
+    logsep: bool = field(default=True, metadata={"doc": "Use logarithmic angular bins if True, linear bins otherwise."})
+
+    def __init__(self, *args, **kwargs):
+        raise TypeError(
+            "AngularBinning instances must be created with AngularBinning.from_binsize() "
+            "or AngularBinning.from_limits()."
+        )
+
+    @classmethod
+    def _build(cls, *, nsep: int, sepmin: float, dsep: float, logsep: bool) -> "AngularBinning":
+        obj = cls.__new__(cls)
+        obj.nsep = int(nsep)
+        obj.sepmin = float(sepmin)
+        obj.dsep = float(dsep)
+        obj.logsep = bool(logsep)
+        return obj
+
+    @classmethod
+    def from_binsize(
+        cls,
+        nsep: int = 36,
+        sepmin: float = 0.01,
+        dsep: float = 0.1,
+        logsep: bool = True,
+    ) -> "AngularBinning":
+        """Create angular bins from a lower edge, bin count, and bin size.
+
+        Parameters
+        ----------
+        nsep : int, default=36
+            Number of angular bins.
+        sepmin : float, default=0.01
+            Lower edge of the first angular bin.
+        dsep : float, default=0.1
+            Bin width; in dex when ``logsep=True``, otherwise linear.
+        logsep : bool, default=True
+            If True, use logarithmic spacing.
+
+        Returns
+        -------
+        AngularBinning
+            Binning instance with the resolved internal representation used by
+            the pair-counting preparation layer.
+        """
+        nsep = int(nsep)
+        sepmin = float(sepmin)
+        dsep = float(dsep)
+        logsep = bool(logsep)
+        if nsep <= 0:
+            raise ValueError("nsep must be positive.")
+        if dsep <= 0.0:
+            raise ValueError("dsep must be positive.")
+        if logsep and sepmin <= 0.0:
+            raise ValueError("sepmin must be positive when logsep=True.")
+        return cls._build(nsep=nsep, sepmin=sepmin, dsep=dsep, logsep=logsep)
+
+    @classmethod
+    def from_limits(
+        cls,
+        nsep: int = 36,
+        sepmin: float = 0.01,
+        sepmax: float = 10.0,
+        logsep: bool = True,
+    ) -> "AngularBinning":
+        """Create angular bins from lower and upper separation limits.
+
+        Parameters
+        ----------
+        nsep : int, default=36
+            Number of angular bins.
+        sepmin : float, default=0.01
+            Lower edge of the first angular bin.
+        sepmax : float, default=10.0
+            Upper edge of the last angular bin.
+        logsep : bool, default=True
+            If True, use logarithmic spacing and derive the logarithmic step.
+
+        Returns
+        -------
+        AngularBinning
+            Binning instance whose internal ``dsep`` matches the requested
+            angular range.
+        """
+        nsep = int(nsep)
+        sepmin = float(sepmin)
+        sepmax = float(sepmax)
+        logsep = bool(logsep)
+        if nsep <= 0:
+            raise ValueError("nsep must be positive.")
+        if logsep:
+            if sepmin <= 0.0 or sepmax <= 0.0:
+                raise ValueError("sepmin and sepmax must be positive when logsep=True.")
+            if sepmax <= sepmin:
+                raise ValueError("sepmax must be larger than sepmin.")
+            dsep = np.log10(sepmax / sepmin) / float(nsep)
+        else:
+            if sepmax <= sepmin:
+                raise ValueError("sepmax must be larger than sepmin.")
+            dsep = (sepmax - sepmin) / float(nsep)
+        return cls._build(nsep=nsep, sepmin=sepmin, dsep=dsep, logsep=logsep)
+
+    @property
+    def edges(self) -> np.ndarray:
+        """Resolved angular bin edges."""
+        return makebins(self.nsep, self.sepmin, self.dsep, self.logsep)[0]
+
+    @property
+    def centers(self) -> np.ndarray:
+        """Resolved angular bin centers."""
+        return makebins(self.nsep, self.sepmin, self.dsep, self.logsep)[1][1]
+
+    @property
+    def widths(self) -> np.ndarray:
+        """Resolved angular bin widths or logarithmic steps."""
+        return makebins(self.nsep, self.sepmin, self.dsep, self.logsep)[1][2]
+
+    @property
+    def sepmax(self) -> float:
+        """Upper edge of the last angular bin."""
+        return float(self.edges[-1])
+
+    def table(self) -> ConfigDescription:
+        """Return a plain-text table with the resolved angular bins.
+
+        Returns
+        -------
+        ConfigDescription
+            Plain-text table with the left edge, right edge, center, and width
+            of each angular bin.
+        """
+        return ConfigDescription(_format_bin_table(self.edges, self.centers, self.widths))
+
+    def __str__(self) -> str:
+        spacing = "log" if self.logsep else "linear"
+        step_label = "dex" if self.logsep else "unit"
+        return (
+            f"AngularBinning({spacing}, {self.nsep} bins, sepmin={_fmt_bin_value(self.sepmin)}, "
+            f"sepmax={_fmt_bin_value(self.sepmax)}, dsep={_fmt_bin_value(self.dsep)} {step_label})"
+        )
+
+    __repr__ = __str__
+
+    @classmethod
+    def describe(cls, recursive: bool = False, _indent: int = 0) -> ConfigDescription:
+        """Build a human-readable description of the angular binning schema."""
+        prefix = " " * _indent
+        base = str(ConfigDocMixin.describe.__func__(cls, recursive=recursive, _indent=_indent))
+        extra = [
+            f"{prefix}",
+            f"{prefix}Constructors",
+            f"{prefix}------------",
+            f"{prefix}from_binsize(nsep=36, sepmin=0.01, dsep=0.1, logsep=True)",
+            f"{prefix}from_limits(nsep=36, sepmin=0.01, sepmax=10.0, logsep=True)",
+            f"{prefix}",
+            f"{prefix}Resolved instance attributes",
+            f"{prefix}----------------------------",
+            f"{prefix}edges, centers, widths, sepmax",
+            f"{prefix}",
+            f"{prefix}Instance helpers",
+            f"{prefix}----------------",
+            f"{prefix}table() -> plain-text table of the resolved bins",
+        ]
+        return ConfigDescription(base + "\n" + "\n".join(extra))
 
 
 @dataclass(slots=True)
@@ -602,7 +793,7 @@ class AngularAutoConfig(ConfigDocMixin):
     estimator: Estimator = field(default="NAT", metadata={"doc": "Angular auto-correlation estimator: 'NAT', 'DP', or 'LS'."})
     columns_data: CatalogColumns = field(default_factory=CatalogColumns, metadata={"doc": "Column names for the data catalog."})
     columns_random: CatalogColumns = field(default_factory=CatalogColumns, metadata={"doc": "Column names for the random catalog."})
-    binning: AngularBinning = field(default_factory=AngularBinning, metadata={"doc": "Angular separation binning specification."})
+    binning: AngularBinning = field(default_factory=AngularBinning.from_binsize, metadata={"doc": "Angular separation binning specification."})
     grid: AngularGridSpec = field(default_factory=AngularGridSpec, metadata={"doc": "Grid / linked-list preparation options for pair counting."})
     weights: WeightSpec = field(default_factory=WeightSpec, metadata={"doc": "Weight handling options."})
     bootstrap: BootstrapSpec = field(default_factory=BootstrapSpec, metadata={"doc": "Bootstrap uncertainty options."})
@@ -626,7 +817,7 @@ class AngularCrossConfig(ConfigDocMixin):
     columns_random1: CatalogColumns = field(default_factory=CatalogColumns, metadata={"doc": "Column names for the first random catalog when that catalog is required by the chosen estimator."})
     columns_data2: CatalogColumns = field(default_factory=CatalogColumns, metadata={"doc": "Column names for the second data catalog."})
     columns_random2: CatalogColumns = field(default_factory=CatalogColumns, metadata={"doc": "Column names for the second random catalog when that catalog is required by the chosen estimator."})
-    binning: AngularBinning = field(default_factory=AngularBinning, metadata={"doc": "Angular separation binning specification."})
+    binning: AngularBinning = field(default_factory=AngularBinning.from_binsize, metadata={"doc": "Angular separation binning specification."})
     grid: AngularGridSpec = field(default_factory=AngularGridSpec, metadata={"doc": "Grid / linked-list preparation options for pair counting."})
     weights: WeightSpec = field(default_factory=WeightSpec, metadata={"doc": "Weight handling options."})
     bootstrap: BootstrapSpec = field(default_factory=lambda: BootstrapSpec(mode="primary"), metadata={"doc": "Bootstrap uncertainty options."})
@@ -646,7 +837,7 @@ class AngularAutoCountsConfig(ConfigDocMixin):
     but the count-only helper itself does not estimate ``w(theta)``.
     """
     columns: CatalogColumns = field(default_factory=CatalogColumns, metadata={"doc": "Column names for the input catalog used by count-only angular auto-pair runs."})
-    binning: AngularBinning = field(default_factory=AngularBinning, metadata={"doc": "Angular separation binning specification."})
+    binning: AngularBinning = field(default_factory=AngularBinning.from_binsize, metadata={"doc": "Angular separation binning specification."})
     grid: AngularGridSpec = field(default_factory=AngularGridSpec, metadata={"doc": "Grid / linked-list preparation options for pair counting."})
     weights: WeightSpec = field(default_factory=WeightSpec, metadata={"doc": "Weight handling options."})
     bootstrap: BootstrapSpec = field(default_factory=BootstrapSpec, metadata={"doc": "Bootstrap resampling options for DD counts."})
@@ -668,7 +859,7 @@ class AngularCrossCountsConfig(ConfigDocMixin):
     """
     columns1: CatalogColumns = field(default_factory=CatalogColumns, metadata={"doc": "Column names for the first input catalog used by count-only angular cross-pair runs."})
     columns2: CatalogColumns = field(default_factory=CatalogColumns, metadata={"doc": "Column names for the second input catalog used by count-only angular cross-pair runs."})
-    binning: AngularBinning = field(default_factory=AngularBinning, metadata={"doc": "Angular separation binning specification."})
+    binning: AngularBinning = field(default_factory=AngularBinning.from_binsize, metadata={"doc": "Angular separation binning specification."})
     grid: AngularGridSpec = field(default_factory=AngularGridSpec, metadata={"doc": "Grid / linked-list preparation options for pair counting."})
     weights: WeightSpec = field(default_factory=WeightSpec, metadata={"doc": "Weight handling options."})
     bootstrap: BootstrapSpec = field(default_factory=lambda: BootstrapSpec(mode="primary"), metadata={"doc": "Bootstrap resampling options for D1D2 counts."})

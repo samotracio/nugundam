@@ -58,3 +58,15 @@ from .projected_public import (
     pcf,
     pccf,
 )
+
+
+from .marked import (
+    AutoMarkSpec,
+    CrossMarkSpec,
+    MarkedAngularCorrelationResult,
+    MarkedProjectedCorrelationResult,
+    macf,
+    maccf,
+    mpcf,
+    mpccf,
+)

@@ -22,6 +22,16 @@ from .projected.models import (
 )
 
 
+def _is_marked_angular_result(obj: Any) -> bool:
+    """Return whether a marked angular result-like object was supplied."""
+    return hasattr(obj, "mtheta") and hasattr(obj, "theta_centers")
+
+
+def _is_marked_projected_result(obj: Any) -> bool:
+    """Return whether a marked projected result-like object was supplied."""
+    return hasattr(obj, "mrp") and hasattr(obj, "rp_centers")
+
+
 def _is_projected_cf_result(obj: Any) -> bool:
     """
     Return whether projected cf result holds for the supplied object.
@@ -40,7 +50,7 @@ def _is_projected_cf_result(obj: Any) -> bool:
     -----
     Internal helper used by the refactored nuGUNDAM package.
     """
-    return isinstance(obj, ProjectedCorrelationResult) or (hasattr(obj, "wp") and hasattr(obj, "rp_centers"))
+    return isinstance(obj, ProjectedCorrelationResult) or _is_marked_projected_result(obj) or (hasattr(obj, "wp") and hasattr(obj, "rp_centers"))
 
 
 def _is_cf_result(obj: Any) -> bool:
@@ -61,7 +71,7 @@ def _is_cf_result(obj: Any) -> bool:
     -----
     Internal helper used by the refactored nuGUNDAM package.
     """
-    return isinstance(obj, AngularCorrelationResult) or (hasattr(obj, "wtheta") and hasattr(obj, "theta_centers")) or _is_projected_cf_result(obj)
+    return _is_marked_angular_result(obj) or isinstance(obj, AngularCorrelationResult) or (hasattr(obj, "wtheta") and hasattr(obj, "theta_centers")) or _is_projected_cf_result(obj)
 
 
 def _is_projected_auto_counts(obj: Any) -> bool:
@@ -223,6 +233,10 @@ def default_ascii_columns(result: Any) -> list[str]:
         Object returned by this helper.
     """
     estimator = (_get_estimator(result) or '').upper()
+    if _is_marked_angular_result(result):
+        return ['theta_centers', 'mtheta', 'mtheta_err', 'plain_wtheta', 'weighted_wtheta']
+    if _is_marked_projected_result(result):
+        return ['rp_centers', 'mrp', 'mrp_err', 'plain_wp', 'weighted_wp']
     if _is_cf_result(result):
         counts = result.counts
         if _is_projected_cf_result(result):
