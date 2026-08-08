@@ -613,8 +613,9 @@ def macf(data, random, config: AngularAutoConfig, *, mark: AutoMarkSpec) -> Mark
     )
     return attach_roundtrip_context(
         result,
-        config={"base_config": asdict(config), "mark": asdict(mark)},
+        config={"base_config": config, "mark": mark},
         provenance=provenance_dict("macf"),
+        store_config=getattr(config, "store_config", "compact"),
     )
 
 
@@ -730,8 +731,9 @@ def maccf(data1, data2, config: AngularCrossConfig, *, mark: CrossMarkSpec, rand
     )
     return attach_roundtrip_context(
         result,
-        config={"base_config": asdict(config), "mark": asdict(mark)},
+        config={"base_config": config, "mark": mark},
         provenance=provenance_dict("maccf"),
+        store_config=getattr(config, "store_config", "compact"),
     )
 
 
@@ -822,8 +824,9 @@ def mpcf(data, random, config: ProjectedAutoConfig, *, mark: AutoMarkSpec) -> Ma
     )
     return attach_roundtrip_context(
         result,
-        config={"base_config": asdict(config), "mark": asdict(mark)},
+        config={"base_config": config, "mark": mark},
         provenance=provenance_dict("mpcf"),
+        store_config=getattr(config, "store_config", "compact"),
     )
 
 
@@ -936,8 +939,9 @@ def mpccf(data1, data2, config: ProjectedCrossConfig, *, mark: CrossMarkSpec, ra
     )
     return attach_roundtrip_context(
         result,
-        config={"base_config": asdict(config), "mark": asdict(mark)},
+        config={"base_config": config, "mark": mark},
         provenance=provenance_dict("mpccf"),
+        store_config=getattr(config, "store_config", "compact"),
     )
 
 

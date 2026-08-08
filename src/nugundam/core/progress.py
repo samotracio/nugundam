@@ -95,6 +95,26 @@ class _StreamEmitter:
     -----
     Internal helper documented for completeness.
     """
+    def __init__(self, *, status_prefix: str | None = None):
+        self._status_prefix = "" if status_prefix is None else str(status_prefix)
+        self._phase: str | None = None
+        self._current = 0
+        self._total = 0
+        self._last_status: str | None = None
+        self._live = False
+
+    def _render_status(self, status: str) -> None:
+        if status == self._last_status:
+            return
+        self._last_status = status
+        self._live = True
+        print(f"\r{self._status_prefix}{status}", end="", flush=True)
+
+    def _clear_live(self) -> None:
+        if self._live:
+            print(flush=True)
+            self._live = False
+
     def emit(self, line: str) -> None:
         """
         Emit.
@@ -110,8 +130,44 @@ class _StreamEmitter:
             Object returned by this helper.
         """
         text = line.rstrip()
-        if text:
+        if not text:
+            return
+        if not self._status_prefix:
             print(text, flush=True)
+            return
+        mh = _HEADER_RE.match(text)
+        if mh is not None:
+            self._phase = _display_phase_label(mh.group(1))
+            self._current = 0
+            self._total = int(mh.group(2))
+            self._render_status(f"{self._phase} 0/{self._total}")
+            return
+        ms = _STRIPE_RE.match(text)
+        if ms is not None:
+            self._phase = _display_phase_label(ms.group(1))
+            self._current = int(ms.group(2))
+            self._total = int(ms.group(3))
+            extra = (ms.group(4) or "").strip()
+            # _render_status() prepends self._status_prefix.  Keep the
+            # status body prefix-free here so CLI progress does not show
+            # duplicate prefixes such as "[pcf:mc_pdf] ... [pcf:mc_pdf] ...".
+            status = f"{self._phase} {self._current}/{self._total}"
+            if extra:
+                status = f"{status}  {extra}"
+            self._render_status(status)
+            return
+        self._clear_live()
+        print(text, flush=True)
+
+    def reset(self, *, status_prefix: str | None = None) -> None:
+        """Reset the emitter state for a new progress run."""
+        if status_prefix is not None:
+            self._status_prefix = "" if status_prefix is None else str(status_prefix)
+        self._phase = None
+        self._current = 0
+        self._total = 0
+        self._last_status = None
+        self._live = False
 
     def close(self) -> None:
         """
@@ -122,6 +178,7 @@ class _StreamEmitter:
         None
             Object returned by this helper.
         """
+        self._clear_live()
         return None
 
 
@@ -133,7 +190,7 @@ class _NotebookStatusEmitter:
     -----
     Internal helper documented for completeness.
     """
-    def __init__(self, *, min_update_interval: float = 0.20):
+    def __init__(self, *, min_update_interval: float = 0.20, status_prefix: str | None = None):
         """
         Initialize the object.
         
@@ -155,7 +212,8 @@ class _NotebookStatusEmitter:
         self._phase: str | None = None
         self._current = 0
         self._total = 0
-        self._status = "waiting"
+        self._status_prefix = "" if status_prefix is None else str(status_prefix)
+        self._status = f"{self._status_prefix}waiting"
         self._dirty = False
         self._last_render = 0.0
         self._min_update_interval = float(min_update_interval)
@@ -267,7 +325,7 @@ class _NotebookStatusEmitter:
             self._phase = _display_phase_label(mh.group(1))
             self._current = 0
             self._total = int(mh.group(2))
-            self._set_status(f"{self._phase} 0/{self._total}")
+            self._set_status(f"{self._status_prefix}{self._phase} 0/{self._total}")
             self._flush(force=True)
             return
         ms = _STRIPE_RE.match(text)
@@ -276,12 +334,25 @@ class _NotebookStatusEmitter:
             self._current = int(ms.group(2))
             self._total = int(ms.group(3))
             extra = (ms.group(4) or "").strip()
-            status = f"{self._phase} {self._current}/{self._total}"
+            status = f"{self._status_prefix}{self._phase} {self._current}/{self._total}"
             if extra:
                 status = f"{status}  {extra}"
             self._set_status(status)
             self._flush(force=self._current >= self._total)
             return
+
+    def reset(self, *, status_prefix: str | None = None) -> None:
+        """Reset the emitter state for a new progress run."""
+        if self._fallback is not None:
+            self._fallback.reset(status_prefix=status_prefix)
+            return
+        if status_prefix is not None:
+            self._status_prefix = "" if status_prefix is None else str(status_prefix)
+        self._phase = None
+        self._current = 0
+        self._total = 0
+        self._set_status(f"{self._status_prefix}waiting")
+        self._flush(force=True)
 
     def close(self) -> None:
         """
@@ -380,7 +451,7 @@ def _process_entry(target: Callable[[str | None], T], progress_path: str, out_qu
     out_queue.put(("ok", value))
 
 
-def _run_with_thread(progress_path: str, poll_interval: float, target: Callable[[str | None], T], *, notebook: bool) -> T:
+def _run_with_thread(progress_path: str, poll_interval: float, target: Callable[[str | None], T], *, notebook: bool, status_prefix: str | None = None, emitter=None) -> T:
     """
     Run with thread.
     
@@ -426,7 +497,10 @@ def _run_with_thread(progress_path: str, poll_interval: float, target: Callable[
 
     worker = threading.Thread(target=_worker, daemon=True)
     worker.start()
-    emitter = _NotebookStatusEmitter() if notebook else _StreamEmitter()
+    if emitter is None:
+        emitter = _NotebookStatusEmitter(status_prefix=status_prefix) if notebook else _StreamEmitter(status_prefix=status_prefix)
+    elif hasattr(emitter, "reset"):
+        emitter.reset(status_prefix=status_prefix)
     try:
         with Path(progress_path).open("r", encoding="utf-8", errors="replace") as fh:
             fh.seek(0, os.SEEK_SET)
@@ -443,7 +517,7 @@ def _run_with_thread(progress_path: str, poll_interval: float, target: Callable[
     return result.value  # type: ignore[return-value]
 
 
-def _run_with_process(progress_path: str, poll_interval: float, target: Callable[[str | None], T]) -> T:
+def _run_with_process(progress_path: str, poll_interval: float, target: Callable[[str | None], T], *, status_prefix: str | None = None, emitter=None) -> T:
     """
     Run with process.
     
@@ -469,7 +543,10 @@ def _run_with_process(progress_path: str, poll_interval: float, target: Callable
     out_queue = ctx.Queue()
     proc = ctx.Process(target=_process_entry, args=(target, progress_path, out_queue), daemon=True)
     proc.start()
-    emitter = _NotebookStatusEmitter()
+    if emitter is None:
+        emitter = _NotebookStatusEmitter(status_prefix=status_prefix)
+    elif hasattr(emitter, "reset"):
+        emitter.reset(status_prefix=status_prefix)
     payload = None
     try:
         with Path(progress_path).open("r", encoding="utf-8", errors="replace") as fh:
@@ -499,6 +576,30 @@ def _run_with_process(progress_path: str, poll_interval: float, target: Callable
     if status != "ok":
         raise RuntimeError(f"Notebook progress worker failed:\n{value}")
     return value  # type: ignore[return-value]
+
+
+def create_status_emitter(*, notebook: bool | None = None, min_update_interval: float = 0.20, status_prefix: str | None = None):
+    """Create a reusable progress-status emitter.
+
+    Parameters
+    ----------
+    notebook : bool, optional
+        Force notebook or stream behavior. When omitted, the current runtime is
+        detected automatically.
+    min_update_interval : float, optional
+        Minimum interval in seconds between notebook updates.
+    status_prefix : str, optional
+        Prefix prepended to the rendered status text.
+
+    Returns
+    -------
+    object
+        A reusable internal emitter compatible with :func:`run_with_progress`.
+    """
+    use_notebook = in_notebook() if notebook is None else bool(notebook)
+    if use_notebook:
+        return _NotebookStatusEmitter(min_update_interval=float(min_update_interval), status_prefix=status_prefix)
+    return _StreamEmitter(status_prefix=status_prefix)
 
 
 @contextmanager
@@ -546,7 +647,7 @@ def progress_context(enabled: bool, progress_file: str | None = None, poll_inter
                 pass
 
 
-def run_with_progress(enabled: bool, progress_file: str | None, poll_interval: float, target: Callable[[str | None], T]) -> T:
+def run_with_progress(enabled: bool, progress_file: str | None, poll_interval: float, target: Callable[[str | None], T], *, status_prefix: str | None = None, status_emitter=None) -> T:
     """
     Run with progress.
     
@@ -571,14 +672,14 @@ def run_with_progress(enabled: bool, progress_file: str | None, poll_interval: f
 
     notebook = in_notebook()
 
-    if not notebook and progress_file is None:
+    if not notebook and progress_file is None and status_prefix is None:
         return target(None)
 
-    if notebook or progress_file is not None:
+    if notebook or progress_file is not None or status_prefix is not None:
         with progress_context(True, progress_file, poll_interval) as progress_path:
             assert progress_path is not None
             if notebook and _prefer_process_backend():
-                return _run_with_process(progress_path, poll_interval, target)
-            return _run_with_thread(progress_path, poll_interval, target, notebook=notebook)
+                return _run_with_process(progress_path, poll_interval, target, status_prefix=status_prefix, emitter=status_emitter)
+            return _run_with_thread(progress_path, poll_interval, target, notebook=notebook, status_prefix=status_prefix, emitter=status_emitter)
 
     return target(None)

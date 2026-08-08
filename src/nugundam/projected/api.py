@@ -6,8 +6,27 @@ import numpy as np
 from ..core.jackknife import jackknife_cov, validate_resampling_choice
 from ..core.progress import run_with_progress
 from ..result_meta import attach_roundtrip_context, provenance_dict
-from .estimators import estimate_auto, estimate_cross, compute_auto_xi2d, compute_cross_xi2d
-from .fortran_bridge import build_auto_count_result, build_auto_counts, build_cross_count_result, build_cross_counts
+from .estimators import (
+    apply_bootstrap_storage_policy,
+    estimate_auto,
+    estimate_cross,
+    compute_auto_xi2d,
+    compute_cross_xi2d,
+)
+from .fortran_bridge import (
+    build_auto_count_result,
+    build_auto_counts,
+    build_cross_count_result,
+    build_cross_counts,
+    pdf_auto_bootstrap_fast_available,
+    pdf_cross_bootstrap_fast_available,
+    exact_pdf_auto_bootstrap_fast_available,
+    exact_pdf_cross_bootstrap_fast_available,
+    qchi_auto_bootstrap_fast_available,
+    qchi_cross_bootstrap_fast_available,
+    qchi_auto_jackknife_fast_available,
+    qchi_cross_jackknife_fast_available,
+)
 from .models import (
     ProjectedAutoConfig,
     ProjectedAutoCountsConfig,
@@ -16,7 +35,14 @@ from .models import (
     ProjectedAutoCounts,
     ProjectedCrossCounts,
 )
-from .prepare import prepare_projected_auto, prepare_projected_cross, subset_prepared_projected_sample
+from .mc_pdf import _mc_pdf_enabled, run_auto_mc_pdf, run_cross_mc_pdf
+from .prepare import (
+    prepare_projected_auto,
+    prepare_projected_cross,
+    subset_prepared_projected_sample,
+    resample_prepared_projected_sample,
+    rebuild_pdf_random_inheritance_from_prepared,
+)
 
 
 def _stage(enabled: bool, message: str) -> None:
@@ -98,8 +124,11 @@ def _auto_counts_to_prepare_config(config: ProjectedAutoCountsConfig) -> Project
         bootstrap=config.bootstrap,
         jackknife=config.jackknife,
         progress=config.progress,
+        pdf=config.pdf,
+        pdf_source=config.pdf_source,
         nthreads=config.nthreads,
         description=config.description,
+        store_config=config.store_config,
     )
 
 
@@ -117,8 +146,11 @@ def _cross_counts_to_prepare_config(config: ProjectedCrossCountsConfig) -> Proje
         bootstrap=config.bootstrap,
         jackknife=config.jackknife,
         progress=config.progress,
+        pdf=config.pdf,
+        pdf_source=config.pdf_source,
         nthreads=config.nthreads,
         description=config.description,
+        store_config=config.store_config,
     )
 
 
@@ -147,6 +179,7 @@ def proj_auto_counts(data, config: ProjectedAutoCountsConfig):
             nbts=count_config.bootstrap.nbts,
             bseed=count_config.bootstrap.bseed,
             progress_file=progress_path,
+            pair_diagnostics=_pdf_pair_diagnostics_enabled(count_config),
         ),
     )
     return attach_roundtrip_context(counts, config=count_config, provenance=provenance_dict("proj_auto_counts"), extra_metadata=meta)
@@ -179,21 +212,222 @@ def proj_cross_counts(data1, data2, config: ProjectedCrossCountsConfig):
             bseed=count_config.bootstrap.bseed,
             primary=count_config.bootstrap.primary,
             progress_file=progress_path,
+            pair_diagnostics=_pdf_pair_diagnostics_enabled(count_config),
         ),
     )
     return attach_roundtrip_context(counts, config=count_config, provenance=provenance_dict("proj_cross_counts"), extra_metadata=meta)
 
+
+
+
+def _pdf_mode_enabled(config) -> bool:
+    return bool(getattr(getattr(config, "pdf", None), "enabled", False))
+
+
+def _pdf_pair_diagnostics_enabled(config) -> bool:
+    return bool(getattr(getattr(config, "pdf", None), "diagnostics", False))
+
+
+def _copy_count_backend_metadata(result, counts) -> None:
+    meta = getattr(counts, "metadata", {}) or {}
+    for key in ("pdf_bootstrap_backend", "qchi_diagnostics_enabled"):
+        if key in meta:
+            result.metadata[key] = meta.get(key)
+    if "jk_touch_available" in meta and "jk_touch_fast" not in result.metadata:
+        result.metadata["jk_touch_fast"] = bool(meta.get("jk_touch_available", False))
+
+
+def _pdf_prepared_mode(sample) -> str:
+    mode = str(getattr(sample, "pdf_repr", "none") or "none").strip().lower()
+    if mode == "none" and getattr(sample, "pdf_idx", None) is not None:
+        if getattr(sample, "pdf_alpha_lib", None) is not None:
+            return "gmm_chi"
+        if getattr(sample, "pdf_prob_lib", None) is not None:
+            return "grid_chi_exact"
+        if getattr(sample, "pdf_qchi_lib", None) is not None:
+            return "quantile_chi"
+    return mode
+
+
+def _has_prepared_pdf_payload(sample) -> bool:
+    return bool(getattr(sample, "pdf_idx", None) is not None and _pdf_prepared_mode(sample) != "none")
+
+
+def _pdf_jackknife_random_policy(config) -> str:
+    policy = str(getattr(getattr(config, "pdf", None), "jk_random_policy", "fixed")).strip().lower()
+    if policy not in {"fixed", "reinherit"}:
+        raise ValueError("pdf.jk_random_policy must be either 'fixed' or 'reinherit'.")
+    return policy
+
+
+def _pdf_gmm_fast_jackknife_pi_compatible(config) -> bool:
+    # GMM jackknife-touch kernels now accumulate all pi bins.
+    return True
+
+
+def _pdf_jackknife_touch_enabled(config) -> bool:
+    kind = str(getattr(getattr(config, 'pdf', None), 'kind', 'gmm_chi')).strip().lower()
+    return (
+        _pdf_mode_enabled(config)
+        and bool(getattr(config.jackknife, 'enabled', False))
+        and _pdf_jackknife_random_policy(config) == 'fixed'
+        and kind in {'gmm_chi', 'grid_chi_exact', 'quantile_chi'}
+        and _pdf_gmm_fast_jackknife_pi_compatible(config)
+        and (kind != 'quantile_chi' or qchi_auto_jackknife_fast_available(weighted=(config.weights.weight_mode == 'weighted')))
+    )
+
+
+def _pdf_native_auto_bootstrap_enabled(data_p, config) -> bool:
+    if not (_pdf_mode_enabled(config) and bool(getattr(config.bootstrap, 'enabled', False)) and not bool(getattr(config.jackknife, 'enabled', False))):
+        return False
+    mode = _pdf_prepared_mode(data_p)
+    weighted = config.weights.weight_mode == 'weighted' or (config.weights.weight_mode == 'auto' and not data_p.wunit)
+    if mode == 'gmm_chi':
+        return bool(pdf_auto_bootstrap_fast_available(weighted=weighted))
+    if mode == 'grid_chi_exact':
+        return bool(exact_pdf_auto_bootstrap_fast_available(weighted=weighted))
+    if mode == 'quantile_chi':
+        return bool(qchi_auto_bootstrap_fast_available(weighted=weighted))
+    return False
+
+
+def _pdf_native_cross_bootstrap_enabled(prep1, prep2, config) -> bool:
+    if not (_pdf_mode_enabled(config) and bool(getattr(config.bootstrap, 'enabled', False)) and not bool(getattr(config.jackknife, 'enabled', False))):
+        return False
+    mode1 = _pdf_prepared_mode(prep1)
+    mode2 = _pdf_prepared_mode(prep2)
+    if mode1 != mode2:
+        return False
+    weighted = config.weights.weight_mode == 'weighted' or (config.weights.weight_mode == 'auto' and (not prep1.wunit or not prep2.wunit))
+    if mode1 == 'gmm_chi':
+        return bool(pdf_cross_bootstrap_fast_available(weighted=weighted))
+    if mode1 == 'grid_chi_exact':
+        return bool(exact_pdf_cross_bootstrap_fast_available(weighted=weighted))
+    if mode1 == 'quantile_chi':
+        return bool(qchi_cross_bootstrap_fast_available(weighted=weighted))
+    return False
+
+
+def _pdf_resampling_seed(config, *, realization: int, role: str) -> int:
+    base = int(getattr(getattr(config, "pdf", None), "seed", 12345))
+    role_tag = sum(ord(ch) for ch in str(role))
+    return int(base + 1009 * int(realization) + role_tag)
+
+
+def _pdf_attach_auto_bootstrap(counts, data_p, rand_p, config, meta):
+    nbts = int(config.bootstrap.nbts)
+    if nbts <= 0:
+        counts.dd_boot = np.zeros((counts.dd.shape[0], counts.dd.shape[1], 0), dtype=np.float64)
+        counts.norm_dd_boot = None
+        counts.sum_w_data_boot = None
+        return counts
+    weighted = config.weights.weight_mode == "weighted" or (config.weights.weight_mode == "auto" and not data_p.wunit)
+    rng = np.random.default_rng(int(config.bootstrap.bseed))
+    dd_boot = np.zeros((counts.dd.shape[0], counts.dd.shape[1], nbts), dtype=np.float64)
+    normb = np.zeros(nbts, dtype=np.float64) if weighted else None
+    sumwb = np.zeros(nbts, dtype=np.float64) if weighted else None
+    for ib in range(nbts):
+        draw = rng.integers(0, int(data_p.nrows), size=int(data_p.nrows), dtype=np.int64)
+        data_b = resample_prepared_projected_sample(data_p, draw, pi_edges=meta["pi_edges"], regrid=False)
+        counts_b = build_auto_counts(
+            data_b,
+            rand_p,
+            rp_edges=meta["rp_edges"],
+            rp_centers=meta["rp_centers"],
+            pi_edges=meta["pi_edges"],
+            pi_centers=meta["pi_centers"],
+            pi_delta=meta["pi_delta"],
+            nthreads=config.nthreads,
+            estimator=config.estimator,
+            weight_mode=config.weights.weight_mode,
+            doboot=False,
+            dojk=False,
+            nreg=0,
+            nbts=0,
+            bseed=config.bootstrap.bseed,
+            progress_file=None,
+            split_random=config.split_random,
+        )
+        dd_boot[:, :, ib] = np.asarray(counts_b.dd, dtype=np.float64)
+        if weighted:
+            w = np.asarray(data_b.weights, dtype=np.float64)
+            sw = float(np.sum(w))
+            sw2 = float(np.sum(np.square(w)))
+            sumwb[ib] = sw
+            normb[ib] = 0.5 * (sw * sw - sw2)
+    counts.dd_boot = dd_boot
+    counts.norm_dd_boot = normb
+    counts.sum_w_data_boot = sumwb
+    counts.metadata["pdf_bootstrap_backend"] = "rerun"
+    return counts
+
+
+def _pdf_attach_cross_bootstrap(counts, prep1, prep_r1, prep2, prep_r2, config, meta):
+    nbts = int(config.bootstrap.nbts)
+    if nbts <= 0:
+        counts.d1d2_boot = np.zeros((counts.d1d2.shape[0], counts.d1d2.shape[1], 0), dtype=np.float64)
+        counts.d1r2_boot = None if counts.d1r2 is None else np.zeros((counts.d1r2.shape[0], counts.d1r2.shape[1], 0), dtype=np.float64)
+        return counts
+    primary = str(config.bootstrap.primary).strip().lower()
+    rng = np.random.default_rng(int(config.bootstrap.bseed))
+    d1d2_boot = np.zeros((counts.d1d2.shape[0], counts.d1d2.shape[1], nbts), dtype=np.float64)
+    d1r2_boot = None if counts.d1r2 is None else np.zeros((counts.d1r2.shape[0], counts.d1r2.shape[1], nbts), dtype=np.float64)
+    for ib in range(nbts):
+        if primary == "data2":
+            draw = rng.integers(0, int(prep2.nrows), size=int(prep2.nrows), dtype=np.int64)
+            d1 = prep1
+            d2 = resample_prepared_projected_sample(prep2, draw, pi_edges=meta["pi_edges"], regrid=False)
+            r1 = prep_r1
+            r2 = prep_r2
+        else:
+            draw = rng.integers(0, int(prep1.nrows), size=int(prep1.nrows), dtype=np.int64)
+            d1 = resample_prepared_projected_sample(prep1, draw, pi_edges=meta["pi_edges"], regrid=False)
+            d2 = prep2
+            r1 = prep_r1
+            r2 = prep_r2
+        counts_b = build_cross_counts(
+            d1,
+            r1,
+            d2,
+            r2,
+            rp_edges=meta["rp_edges"],
+            rp_centers=meta["rp_centers"],
+            pi_edges=meta["pi_edges"],
+            pi_centers=meta["pi_centers"],
+            pi_delta=meta["pi_delta"],
+            nthreads=config.nthreads,
+            estimator=config.estimator,
+            weight_mode=config.weights.weight_mode,
+            doboot=False,
+            dojk=False,
+            nreg=0,
+            nbts=0,
+            bseed=config.bootstrap.bseed,
+            primary=config.bootstrap.primary,
+            progress_file=None,
+        )
+        d1d2_boot[:, :, ib] = np.asarray(counts_b.d1d2, dtype=np.float64)
+        if d1r2_boot is not None and counts_b.d1r2 is not None:
+            d1r2_boot[:, :, ib] = np.asarray(counts_b.d1r2, dtype=np.float64)
+    counts.d1d2_boot = d1d2_boot
+    counts.d1r2_boot = d1r2_boot
+    counts.metadata["pdf_bootstrap_backend"] = "rerun"
+    return counts
 
 def _jackknife_realizations_auto_rerun(data_p, rand_p, config, meta):
     nregions = int(meta.get("jk_nregions") or 0)
     if nregions <= 1:
         return np.zeros((0, len(meta["rp_centers"])), dtype=np.float64)
     weighted = config.weights.weight_mode == "weighted" or (config.weights.weight_mode == "auto" and not data_p.wunit)
+    pdf_mode = _has_prepared_pdf_payload(data_p)
+    jk_policy = _pdf_jackknife_random_policy(config) if pdf_mode else "fixed"
     out = np.zeros((nregions, len(meta["rp_centers"])), dtype=np.float64)
     for k in range(nregions):
         data_sub = subset_prepared_projected_sample(data_p, data_p.region_id != k, pi_edges=meta["pi_edges"])
         rand_sub = subset_prepared_projected_sample(rand_p, rand_p.region_id != k, pi_edges=meta["pi_edges"])
-        counts_k = build_auto_counts(data_sub, rand_sub, rp_edges=meta["rp_edges"], rp_centers=meta["rp_centers"], pi_edges=meta["pi_edges"], pi_centers=meta["pi_centers"], pi_delta=meta["pi_delta"], nthreads=config.nthreads, estimator=config.estimator, weight_mode=config.weights.weight_mode, doboot=False, dojk=False, nreg=0, nbts=0, bseed=config.bootstrap.bseed, progress_file=None)
+        if pdf_mode and jk_policy == "reinherit":
+            rand_sub = rebuild_pdf_random_inheritance_from_prepared(rand_sub, data_sub, config, pi_edges=meta["pi_edges"], seed=_pdf_resampling_seed(config, realization=k, role="jk-auto-rand"), regrid=False)
+        counts_k = build_auto_counts(data_sub, rand_sub, rp_edges=meta["rp_edges"], rp_centers=meta["rp_centers"], pi_edges=meta["pi_edges"], pi_centers=meta["pi_centers"], pi_delta=meta["pi_delta"], nthreads=config.nthreads, estimator=config.estimator, weight_mode=config.weights.weight_mode, doboot=False, dojk=False, nreg=0, nbts=0, bseed=config.bootstrap.bseed, progress_file=None, split_random=config.split_random)
         result_k = estimate_auto(counts_k, estimator=config.estimator, data_weights=(data_sub.weights if weighted else None))
         out[k] = result_k.wp
     return out
@@ -250,6 +484,9 @@ def _jackknife_realizations_auto_touch(counts: ProjectedAutoCounts, data_p, rand
 
 
 def _jackknife_realizations_auto(data_p, rand_p, counts, config, meta):
+    pdf_mode = _has_prepared_pdf_payload(data_p)
+    if pdf_mode and _pdf_jackknife_random_policy(config) != 'fixed':
+        return _jackknife_realizations_auto_rerun(data_p, rand_p, config, meta)
     if _auto_touch_ready(counts, config.estimator):
         return _jackknife_realizations_auto_touch(counts, data_p, rand_p, config, meta)
     return _jackknife_realizations_auto_rerun(data_p, rand_p, config, meta)
@@ -260,12 +497,19 @@ def _jackknife_realizations_cross_rerun(prep1, prep_r1, prep2, prep_r2, config, 
     if nregions <= 1:
         return np.zeros((0, len(meta["rp_centers"])), dtype=np.float64)
     weighted = config.weights.weight_mode == "weighted" or (config.weights.weight_mode == "auto" and (not prep1.wunit or not prep2.wunit))
+    pdf_mode = _has_prepared_pdf_payload(prep1) and _has_prepared_pdf_payload(prep2)
+    jk_policy = _pdf_jackknife_random_policy(config) if pdf_mode else "fixed"
     out = np.zeros((nregions, len(meta["rp_centers"])), dtype=np.float64)
     for k in range(nregions):
         d1 = subset_prepared_projected_sample(prep1, prep1.region_id != k, pi_edges=meta["pi_edges"])
         d2 = subset_prepared_projected_sample(prep2, prep2.region_id != k, pi_edges=meta["pi_edges"])
         r1 = None if prep_r1 is None else subset_prepared_projected_sample(prep_r1, prep_r1.region_id != k, pi_edges=meta["pi_edges"])
         r2 = None if prep_r2 is None else subset_prepared_projected_sample(prep_r2, prep_r2.region_id != k, pi_edges=meta["pi_edges"])
+        if pdf_mode and jk_policy == "reinherit":
+            if r1 is not None:
+                r1 = rebuild_pdf_random_inheritance_from_prepared(r1, d1, config, pi_edges=meta["pi_edges"], seed=_pdf_resampling_seed(config, realization=k, role="jk-cross-r1"), regrid=False)
+            if r2 is not None:
+                r2 = rebuild_pdf_random_inheritance_from_prepared(r2, d2, config, pi_edges=meta["pi_edges"], seed=_pdf_resampling_seed(config, realization=k, role="jk-cross-r2"), regrid=False)
         counts_k = build_cross_counts(d1, r1, d2, r2, rp_edges=meta["rp_edges"], rp_centers=meta["rp_centers"], pi_edges=meta["pi_edges"], pi_centers=meta["pi_centers"], pi_delta=meta["pi_delta"], nthreads=config.nthreads, estimator=config.estimator, weight_mode=config.weights.weight_mode, doboot=False, dojk=False, nreg=0, nbts=0, bseed=config.bootstrap.bseed, primary=config.bootstrap.primary, progress_file=None)
         result_k = estimate_cross(counts_k, estimator=config.estimator, sum_w1=(float(d1.weights.sum()) if weighted else None), sum_w2=(float(d2.weights.sum()) if weighted else None))
         out[k] = result_k.wp
@@ -325,6 +569,9 @@ def _jackknife_realizations_cross_touch(counts: ProjectedCrossCounts, prep1, pre
 
 
 def _jackknife_realizations_cross(prep1, prep_r1, prep2, prep_r2, counts, config, meta):
+    pdf_mode = _has_prepared_pdf_payload(prep1) and _has_prepared_pdf_payload(prep2)
+    if pdf_mode and _pdf_jackknife_random_policy(config) != 'fixed':
+        return _jackknife_realizations_cross_rerun(prep1, prep_r1, prep2, prep_r2, config, meta)
     if _cross_touch_ready(counts, config.estimator):
         return _jackknife_realizations_cross_touch(counts, prep1, prep_r1, prep2, prep_r2, config, meta)
     return _jackknife_realizations_cross_rerun(prep1, prep_r1, prep2, prep_r2, config, meta)
@@ -357,10 +604,16 @@ def pcf(data, random, config: ProjectedAutoConfig):
         attached counts metadata also records the split chunk sizes and the RR
         pair normalization actually used by the estimator.
     """
+    if _mc_pdf_enabled(config):
+        validate_resampling_choice(config.bootstrap, config.jackknife)
+        _validate_split_random_auto("pcf", config)
+        return run_auto_mc_pdf(data, random, config)
     validate_resampling_choice(config.bootstrap, config.jackknife)
     _validate_split_random_auto("pcf", config)
     _stage(config.progress.enabled, "[pcf] preparing data and randoms")
     data_p, rand_p, meta = prepare_projected_auto(data, random, config)
+    pdf_mode = _pdf_mode_enabled(config)
+    pdf_bootstrap_fast = _pdf_native_auto_bootstrap_enabled(data_p, config)
     _stage(config.progress.enabled, f"[pcf] counting DD / RR / DR with estimator={config.estimator}")
     counts = run_with_progress(
         config.progress.enabled,
@@ -377,19 +630,31 @@ def pcf(data, random, config: ProjectedAutoConfig):
             nthreads=config.nthreads,
             estimator=config.estimator,
             weight_mode=config.weights.weight_mode,
-            doboot=(config.bootstrap.enabled and not config.jackknife.enabled),
-            dojk=config.jackknife.enabled,
+            doboot=(config.bootstrap.enabled and not config.jackknife.enabled and (not pdf_mode or pdf_bootstrap_fast)),
+            dojk=(config.jackknife.enabled and (not pdf_mode or _pdf_jackknife_touch_enabled(config))),
             nreg=int(meta.get("jk_nregions") or 0),
             nbts=config.bootstrap.nbts,
             bseed=config.bootstrap.bseed,
             progress_file=progress_path,
             split_random=config.split_random,
+            pair_diagnostics=_pdf_pair_diagnostics_enabled(config),
         ),
     )
     counts = attach_roundtrip_context(counts, config=config, provenance=provenance_dict("pcf"), extra_metadata=meta)
+    if pdf_mode and config.bootstrap.enabled and not config.jackknife.enabled:
+        if pdf_bootstrap_fast and counts.dd_boot is not None and counts.dd_boot.size > 0:
+            counts.metadata["pdf_bootstrap_backend"] = "compiled"
+        else:
+            _stage(config.progress.enabled, "[pcf] assembling bootstrap resamples")
+            counts = _pdf_attach_auto_bootstrap(counts, data_p, rand_p, config, meta)
     weighted = config.weights.weight_mode == "weighted" or (config.weights.weight_mode == "auto" and not data_p.wunit)
     _stage(config.progress.enabled, "[pcf] estimating correlation")
-    result = estimate_auto(counts, estimator=config.estimator, data_weights=(data_p.weights if weighted else None))
+    result = estimate_auto(
+        counts,
+        estimator=config.estimator,
+        data_weights=(data_p.weights if weighted else None),
+        store_bootstrap_cumulative=bool(getattr(config.bootstrap, "store_cumulative", True)),
+    )
     if config.jackknife.enabled:
         _stage(config.progress.enabled, "[pcf] assembling jackknife covariance")
         realizations = _jackknife_realizations_auto(data_p, rand_p, counts, config, meta)
@@ -398,15 +663,23 @@ def pcf(data, random, config: ProjectedAutoConfig):
         result.cov = cov if config.jackknife.return_cov else None
         result.realizations = realizations if config.jackknife.return_realizations else None
         result.metadata.update({"jackknife": True, "jk_nregions": int(realizations.shape[0]), "jk_region_source": meta.get("jk_region_source"), "jk_touch_fast": bool(counts.metadata.get("jk_touch_available", False))})
+    _copy_count_backend_metadata(result, counts)
+    result = apply_bootstrap_storage_policy(result, config.bootstrap)
     _stage(config.progress.enabled, "[pcf] done")
     return attach_roundtrip_context(result, config=config, provenance=provenance_dict("pcf"), extra_metadata=meta)
 
 
 def pccf(data1, data2, config: ProjectedCrossConfig, *, random1=None, random2=None):
+    if _mc_pdf_enabled(config):
+        validate_resampling_choice(config.bootstrap, config.jackknife)
+        _validate_cross_randoms("pccf", config.estimator, config.bootstrap.primary, random1, random2)
+        return run_cross_mc_pdf(data1, data2, config, random1=random1, random2=random2)
     validate_resampling_choice(config.bootstrap, config.jackknife)
     _validate_cross_randoms("pccf", config.estimator, config.bootstrap.primary, random1, random2)
     _stage(config.progress.enabled, "[pccf] preparing data and randoms")
     prep1, prep_r1, prep2, prep_r2, meta = prepare_projected_cross(data1, random1, data2, random2, config)
+    pdf_mode = _pdf_mode_enabled(config)
+    pdf_bootstrap_fast = _pdf_native_cross_bootstrap_enabled(prep1, prep2, config)
     _stage(config.progress.enabled, f"[pccf] counting cross terms with estimator={config.estimator}")
     counts = run_with_progress(
         config.progress.enabled,
@@ -425,19 +698,32 @@ def pccf(data1, data2, config: ProjectedCrossConfig, *, random1=None, random2=No
             nthreads=config.nthreads,
             estimator=config.estimator,
             weight_mode=config.weights.weight_mode,
-            doboot=(config.bootstrap.enabled and not config.jackknife.enabled),
-            dojk=config.jackknife.enabled,
+            doboot=(config.bootstrap.enabled and not config.jackknife.enabled and (not pdf_mode or pdf_bootstrap_fast)),
+            dojk=(config.jackknife.enabled and (not pdf_mode or _pdf_jackknife_touch_enabled(config))),
             nreg=int(meta.get("jk_nregions") or 0),
             nbts=config.bootstrap.nbts,
             bseed=config.bootstrap.bseed,
             primary=config.bootstrap.primary,
             progress_file=progress_path,
+            pair_diagnostics=_pdf_pair_diagnostics_enabled(config),
         ),
     )
     counts = attach_roundtrip_context(counts, config=config, provenance=provenance_dict("pccf"), extra_metadata=meta)
+    if pdf_mode and config.bootstrap.enabled and not config.jackknife.enabled:
+        if pdf_bootstrap_fast and counts.d1d2_boot is not None and counts.d1d2_boot.size > 0:
+            counts.metadata["pdf_bootstrap_backend"] = "compiled"
+        else:
+            _stage(config.progress.enabled, "[pccf] assembling bootstrap resamples")
+            counts = _pdf_attach_cross_bootstrap(counts, prep1, prep_r1, prep2, prep_r2, config, meta)
     weighted = config.weights.weight_mode == "weighted" or (config.weights.weight_mode == "auto" and (not prep1.wunit or not prep2.wunit))
     _stage(config.progress.enabled, "[pccf] estimating correlation")
-    result = estimate_cross(counts, estimator=config.estimator, sum_w1=(float(prep1.weights.sum()) if weighted else None), sum_w2=(float(prep2.weights.sum()) if weighted else None))
+    result = estimate_cross(
+        counts,
+        estimator=config.estimator,
+        sum_w1=(float(prep1.weights.sum()) if weighted else None),
+        sum_w2=(float(prep2.weights.sum()) if weighted else None),
+        store_bootstrap_cumulative=bool(getattr(config.bootstrap, "store_cumulative", True)),
+    )
     if config.jackknife.enabled:
         _stage(config.progress.enabled, "[pccf] assembling jackknife covariance")
         realizations = _jackknife_realizations_cross(prep1, prep_r1, prep2, prep_r2, counts, config, meta)
@@ -446,5 +732,7 @@ def pccf(data1, data2, config: ProjectedCrossConfig, *, random1=None, random2=No
         result.cov = cov if config.jackknife.return_cov else None
         result.realizations = realizations if config.jackknife.return_realizations else None
         result.metadata.update({"jackknife": True, "jk_nregions": int(realizations.shape[0]), "jk_region_source": meta.get("jk_region_source"), "jk_touch_fast": bool(counts.metadata.get("jk_touch_available", False))})
+    _copy_count_backend_metadata(result, counts)
+    result = apply_bootstrap_storage_policy(result, config.bootstrap)
     _stage(config.progress.enabled, "[pccf] done")
     return attach_roundtrip_context(result, config=config, provenance=provenance_dict("pccf"), extra_metadata=meta)

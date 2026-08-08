@@ -1,15 +1,17 @@
 # <img src="./docs/images/banner.png">
 
+# nuGUNDAM
+
 nuGUNDAM is a package for fast two-point correlation functions in galaxy surveys.
 
 It combines highly optimized Fortran/OpenMP counting cores with a modern, modular
 Python interface. The current package exposes clean, typed APIs for:
 
-- **angular auto/cross correlations**
-- **projected auto/cross correlations**
+- **angular and projected space auto/cross correlations**
+- **PDF-aware projected auto/cross correlations**
 - **marked angular/projected auto/cross correlations**
-- pair-count runs in angular and projected space
-- bootstrap and jackknife uncertainty workflows
+- plain and/or weighted pair-counts in angular and projected space
+- fully automatic bootstrap and jackknife uncertainty workflows
 - generic input tables (Astropy, pandas, PyArrow, NumPy structured arrays, mappings)
 - native result I/O, ASCII export, and plotting routines in 1D/2D
 - split-random acceleration for LS autocorrelations
@@ -33,6 +35,20 @@ Python interface. The current package exposes clean, typed APIs for:
 - `mpccf(data1, data2, config, *, mark=..., random1=None, random2=None)`
 - `proj_auto_counts(data, config)`
 - `proj_cross_counts(data1, data2, config)`
+
+### PDF-aware projected correlations
+
+Projected auto- and cross-correlations can propagate per-object redshift PDFs directly
+through the pair counts. Four modes are available:
+
+- **exact-grid** (`grid_chi_exact`): deterministic integration of empirical PDFs on a common radial grid
+- **GMM** (`gmm_chi`): deterministic compression into a small Gaussian mixture
+- **16quant** (`quantile_chi`): deterministic equal-probability quantile representation
+- **Monte Carlo**: averages ordinary projected pair counts over redshift realizations drawn from the PDFs
+
+All modes use the standard `pcf` / `pccf` interface and return the usual projected
+result objects. Resolved line-of-sight bins can be used to inspect `xi(rp, pi)` or to
+integrate the projected statistic to a selected `pi_max`.
 
 ### Marked-correlation API
 
@@ -421,10 +437,94 @@ The returned object is a `ProjectedCorrelationResult` with fields such as:
 - `wp_err`
 - `estimator`
 - `counts`
+- `bootstrap_realizations` when bootstrap is enabled, shape `(n_bootstrap, n_rp)`
+- `bootstrap_cumulative_realizations`, shape `(n_bootstrap, n_rp, n_pi)`
+- `bootstrap_counts` for MC-PDF fast bootstrap runs, when the bootstrap count
+  ensemble differs from the central count ensemble
 - `metadata`
+
+Projected bootstrap storage is controlled through:
+
+```python
+cfg.bootstrap.enabled = True
+cfg.bootstrap.store_counts = True       # default
+cfg.bootstrap.store_cumulative = True   # default
+```
+
+For ordinary point-redshift and deterministic PDF runs (GMM, ePDF, and
+16Quant), bootstrap count cubes remain in `res.counts`. For MC-PDF with the
+fast resampling backend, the separate averaged bootstrap count object is
+retained in `res.bootstrap_counts`. The MC rerun backend stores cumulative
+bootstrap realizations directly because DD/DR/RR can differ between resamples.
+A cumulative one-sigma array can be obtained with:
+
+```python
+wp_cumulative_err = np.std(
+    res.bootstrap_cumulative_realizations,
+    axis=0,
+)  # shape: (n_rp, n_pi)
+```
 
 If you already have comoving distances in the catalog, set `DistanceSpec(calcdist=False)`
 and point `ProjectedCatalogColumns.distance` to that column.
+
+## Quick start: PDF-aware projected auto-correlation
+
+Start from an ordinary `ProjectedAutoConfig`, then attach a common redshift grid and a
+PDF matrix whose rows follow the data catalog order. For example, the default
+16-quantile mode can be enabled as follows:
+
+```python
+from copy import deepcopy
+from nugundam import PDFSourceSpec, pcf
+
+cfg_pdf = deepcopy(cfg)
+cfg_pdf.pdf.enabled = True
+cfg_pdf.pdf.kind = "quantile_chi"
+cfg_pdf.pdf.nquant = 16
+cfg_pdf.pdf.random_pdf_policy = "inherit"
+
+cfg_pdf.pdf_source.enabled = True
+cfg_pdf.pdf_source.z_grid = z_grid       # centers or edges
+cfg_pdf.pdf_source.grid_kind = "edges"
+cfg_pdf.pdf_source.pdf_data = PDFSourceSpec(
+    kind="external_matrix",
+    matrix=pdf_matrix,                   # shape: (n_data, n_zbins)
+)
+
+res_pdf = pcf(data, random, cfg_pdf)
+```
+
+The same input can be used with the other deterministic modes by changing:
+
+```python
+cfg_pdf.pdf.kind = "grid_chi_exact"      # exact empirical-PDF integration
+cfg_pdf.pdf.kind = "gmm_chi"             # Gaussian-mixture compression
+cfg_pdf.pdf.k = 3                         # number of GMM components
+```
+
+Monte Carlo uses the separate `mc_pdf` block:
+
+```python
+cfg_mc = deepcopy(cfg)
+cfg_mc.mc_pdf.enabled = True
+cfg_mc.mc_pdf.nreal = 25
+cfg_mc.mc_pdf.seed = 12345
+cfg_mc.mc_pdf.random_mode = "inherit_realization"
+cfg_mc.mc_pdf.sample_within_bin = True
+cfg_mc.mc_pdf.z_grid = z_grid
+cfg_mc.mc_pdf.grid_kind = "edges"
+cfg_mc.mc_pdf.pdf_data = PDFSourceSpec(
+    kind="external_matrix",
+    matrix=pdf_matrix,
+)
+
+res_mc = pcf(data, random, cfg_mc)
+```
+
+For compiled deterministic modes, random catalogs normally inherit PDF assignments
+from the associated data sample; an independent random-PDF matrix is therefore not
+required for the usual auto-correlation workflow.
 
 ## Quick start: projected cross-correlation
 

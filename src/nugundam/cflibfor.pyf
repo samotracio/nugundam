@@ -257,6 +257,349 @@ python module _cflibfor ! in
                 real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
             end subroutine rppi_A_wg
 
+            subroutine rppi_A_gmm_wp(nt,npt,dec,dc,dcang,x,y,z,kpdf,nlib,alpha,mu,sig,idx,nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,cntid,logf,progressf,sk,ll,aapv) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,mxh1,mxh2,mxh3,kpdf,nlib
+                real(kind=8) dimension(npt),depend(npt) :: dec,x,y,z,dc,dcang
+                real(kind=8) dimension(kpdf,nlib),depend(kpdf,nlib) :: alpha,mu,sig
+                integer dimension(npt),depend(npt) :: idx
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch,probfloor
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
+            end subroutine rppi_A_gmm_wp
+
+
+            subroutine rppi_A_qchi_wp(nt,npt,dec,dc,dcang,x,y,z,nq,nlib,qchi,qlo,qhi,idx,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,diag_enabled,cntid,logf,progressf,sk,ll,aapv,qdiag) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,mxh1,mxh2,mxh3,nq,nlib,diag_enabled
+                real(kind=8) dimension(npt),depend(npt) :: dec,x,y,z,dc,dcang
+                real(kind=8) dimension(nq,nlib),depend(nq,nlib) :: qchi
+                real(kind=8) dimension(nlib),depend(nlib) :: qlo,qhi
+                integer dimension(npt),depend(npt) :: idx
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
+                integer(kind=8) intent(out),dimension(9) :: qdiag
+            end subroutine rppi_A_qchi_wp
+            subroutine rppi_A_qchi_wp_wg(nt,npt,dec,dc,dcang,wei,x,y,z,nq,nlib,qchi,qlo,qhi,idx,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,wfib,diag_enabled,cntid,logf,progressf,sk,ll,aapv,qdiag) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,mxh1,mxh2,mxh3,nq,nlib,wfib,diag_enabled
+                real(kind=8) dimension(npt),depend(npt) :: dec,x,y,z,dc,dcang
+                real(kind=4) dimension(npt),depend(npt) :: wei
+                real(kind=8) dimension(nq,nlib),depend(nq,nlib) :: qchi
+                real(kind=8) dimension(nlib),depend(nlib) :: qlo,qhi
+                integer dimension(npt),depend(npt) :: idx
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
+                integer(kind=8) intent(out),dimension(9) :: qdiag
+            end subroutine rppi_A_qchi_wp_wg
+
+            subroutine rppi_Ajk_qchi_wp(nt,npt,dec,dc,dcang,x,y,z,nq,nlib,qchi,qlo,qhi,idx,reg,nreg,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,cntid,logf,progressf,sk,ll,aapv,touch) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,mxh1,mxh2,mxh3,nq,nlib,nreg
+                real(kind=8) dimension(npt),depend(npt) :: dec,x,y,z,dc,dcang
+                real(kind=8) dimension(nq,nlib),depend(nq,nlib) :: qchi
+                real(kind=8) dimension(nlib),depend(nlib) :: qlo,qhi
+                integer dimension(npt),depend(npt) :: idx,reg
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
+                real(kind=8) intent(out),dimension(nreg,nsepv,nsepp),depend(nreg,nsepv,nsepp) :: touch
+            end subroutine rppi_Ajk_qchi_wp
+            subroutine rppi_Ab_qchi_wp(nt,npt,dec,dc,dcang,x,y,z,nq,nlib,qchi,qlo,qhi,idx,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,nbts,bseed,cntid,logf,progressf,sk,ll,aapv,baapv) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,mxh1,mxh2,mxh3,nq,nlib,nbts,bseed
+                real(kind=8) dimension(npt),depend(npt) :: dec,x,y,z,dc,dcang
+                real(kind=8) dimension(nq,nlib),depend(nq,nlib) :: qchi
+                real(kind=8) dimension(nlib),depend(nlib) :: qlo,qhi
+                integer dimension(npt),depend(npt) :: idx
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
+                real(kind=8) intent(out),dimension(nbts,nsepp,nsepv),depend(nbts,nsepp,nsepv) :: baapv
+            end subroutine rppi_Ab_qchi_wp
+
+            subroutine rppi_A_gmm_wp_wg(nt,npt,dec,dc,dcang,wei,x,y,z,kpdf,nlib,alpha,mu,sig,idx,nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,wfib,cntid,logf,progressf,sk,ll,aapv) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,mxh1,mxh2,mxh3,wfib,kpdf,nlib
+                real(kind=8) dimension(npt),depend(npt) :: dec,x,y,z,dc,dcang
+                real(kind=4) dimension(npt),depend(npt) :: wei
+                real(kind=8) dimension(kpdf,nlib),depend(kpdf,nlib) :: alpha,mu,sig
+                integer dimension(npt),depend(npt) :: idx
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch,probfloor
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
+            end subroutine rppi_A_gmm_wp_wg
+
+
+            subroutine rppi_A_grid_wp(nt,npt,dec,dc,dcang,x,y,z,ngrid,nlib,grid,prob,cdf,lo,hi,idx,nact,act_idx,act_start,act_count,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,cntid,logf,progressf,sk,ll,aapv) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,ngrid,nlib,nsepp,nsepv,mxh1,mxh2,mxh3
+                real(kind=8) dimension(npt),depend(npt) :: dec,dc,dcang,x,y,z
+                real(kind=8) dimension(ngrid),depend(ngrid) :: grid
+                real(kind=8) dimension(ngrid,nlib),depend(ngrid,nlib) :: prob,cdf
+                integer dimension(nlib),depend(nlib) :: lo,hi
+                integer dimension(npt),depend(npt) :: idx
+                integer intent(hide),depend(act_idx) :: nact=shape(act_idx,0)
+                integer dimension(nact),depend(nact) :: act_idx
+                integer dimension(nlib),depend(nlib) :: act_start,act_count
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) :: sbound(6)
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
+            end subroutine rppi_A_grid_wp
+
+            subroutine rppi_A_grid_wp_wg(nt,npt,dec,dc,dcang,wei,x,y,z,ngrid,nlib,grid,prob,cdf,lo,hi,idx,nact,act_idx,act_start,act_count,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,wfib,cntid,logf,progressf,sk,ll,aapv) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,ngrid,nlib,nsepp,nsepv,mxh1,mxh2,mxh3,wfib
+                real(kind=8) dimension(npt),depend(npt) :: dec,dc,dcang,x,y,z
+                real(kind=4) dimension(npt),depend(npt) :: wei
+                real(kind=8) dimension(ngrid),depend(ngrid) :: grid
+                real(kind=8) dimension(ngrid,nlib),depend(ngrid,nlib) :: prob,cdf
+                integer dimension(nlib),depend(nlib) :: lo,hi
+                integer dimension(npt),depend(npt) :: idx
+                integer intent(hide),depend(act_idx) :: nact=shape(act_idx,0)
+                integer dimension(nact),depend(nact) :: act_idx
+                integer dimension(nlib),depend(nlib) :: act_start,act_count
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) :: sbound(6)
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
+            end subroutine rppi_A_grid_wp_wg
+
+
+
+            subroutine rppi_Ab_grid_wp(nt,npt,dec,dc,dcang,x,y,z,ngrid,nlib,grid,prob,cdf,lo,hi,idx,nact,act_idx,act_start,act_count,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,nbts,bseed,cntid,logf,progressf,sk,ll,aapv,baapv) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,ngrid,nlib,nsepp,nsepv,mxh1,mxh2,mxh3,nbts,bseed
+                real(kind=8) dimension(npt),depend(npt) :: dec,dc,dcang,x,y,z
+                real(kind=8) dimension(ngrid),depend(ngrid) :: grid
+                real(kind=8) dimension(ngrid,nlib),depend(ngrid,nlib) :: prob,cdf
+                integer dimension(nlib),depend(nlib) :: lo,hi
+                integer dimension(npt),depend(npt) :: idx
+                integer intent(hide),depend(act_idx) :: nact=shape(act_idx,0)
+                integer dimension(nact),depend(nact) :: act_idx
+                integer dimension(nlib),depend(nlib) :: act_start,act_count
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) :: sbound(6)
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
+                real(kind=8) intent(out),dimension(nbts,nsepp,nsepv),depend(nbts,nsepp,nsepv) :: baapv
+            end subroutine rppi_Ab_grid_wp
+
+            subroutine rppi_Ab_grid_wp_wg(nt,npt,dec,dc,dcang,wei,x,y,z,ngrid,nlib,grid,prob,cdf,lo,hi,idx,nact,act_idx,act_start,act_count,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,nbts,bseed,wfib,cntid,logf,progressf,sk,ll,aapv,baapv,normb,sumwb) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,ngrid,nlib,nsepp,nsepv,mxh1,mxh2,mxh3,nbts,bseed,wfib
+                real(kind=8) dimension(npt),depend(npt) :: dec,dc,dcang,x,y,z
+                real(kind=4) dimension(npt),depend(npt) :: wei
+                real(kind=8) dimension(ngrid),depend(ngrid) :: grid
+                real(kind=8) dimension(ngrid,nlib),depend(ngrid,nlib) :: prob,cdf
+                integer dimension(nlib),depend(nlib) :: lo,hi
+                integer dimension(npt),depend(npt) :: idx
+                integer intent(hide),depend(act_idx) :: nact=shape(act_idx,0)
+                integer dimension(nact),depend(nact) :: act_idx
+                integer dimension(nlib),depend(nlib) :: act_start,act_count
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) :: sbound(6)
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
+                real(kind=8) intent(out),dimension(nbts,nsepp,nsepv),depend(nbts,nsepp,nsepv) :: baapv
+                real(kind=8) intent(out),dimension(nbts),depend(nbts) :: normb,sumwb
+            end subroutine rppi_Ab_grid_wp_wg
+
+
+
+
+            subroutine rppi_Ajk_grid_wp(nt,npt,dec,dc,dcang,x,y,z,ngrid,nlib,grid,prob,cdf,lo,hi,idx,nact,act_idx,act_start,act_count,reg,nreg,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,cntid,logf,progressf,sk,ll,aapv,touch) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,ngrid,nlib,nsepp,nsepv,mxh1,mxh2,mxh3,nreg
+                real(kind=8) dimension(npt),depend(npt) :: dec,dc,dcang,x,y,z
+                real(kind=8) dimension(ngrid),depend(ngrid) :: grid
+                real(kind=8) dimension(ngrid,nlib),depend(ngrid,nlib) :: prob,cdf
+                integer dimension(nlib),depend(nlib) :: lo,hi
+                integer dimension(npt),depend(npt) :: idx,reg
+                integer intent(hide),depend(act_idx) :: nact=shape(act_idx,0)
+                integer dimension(nact),depend(nact) :: act_idx
+                integer dimension(nlib),depend(nlib) :: act_start,act_count
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) :: sbound(6)
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
+                real(kind=8) intent(out),dimension(nreg,nsepv,nsepp),depend(nreg,nsepv,nsepp) :: touch
+            end subroutine rppi_Ajk_grid_wp
+
+            subroutine rppi_Ajk_grid_wp_wg(nt,npt,dec,dc,dcang,wei,x,y,z,ngrid,nlib,grid,prob,cdf,lo,hi,idx,nact,act_idx,act_start,act_count,reg,nreg,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,wfib,cntid,logf,progressf,sk,ll,aapv,touch) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,ngrid,nlib,nsepp,nsepv,mxh1,mxh2,mxh3,wfib,nreg
+                real(kind=8) dimension(npt),depend(npt) :: dec,dc,dcang,x,y,z
+                real(kind=4) dimension(npt),depend(npt) :: wei
+                real(kind=8) dimension(ngrid),depend(ngrid) :: grid
+                real(kind=8) dimension(ngrid,nlib),depend(ngrid,nlib) :: prob,cdf
+                integer dimension(nlib),depend(nlib) :: lo,hi
+                integer dimension(npt),depend(npt) :: idx,reg
+                integer intent(hide),depend(act_idx) :: nact=shape(act_idx,0)
+                integer dimension(nact),depend(nact) :: act_idx
+                integer dimension(nlib),depend(nlib) :: act_start,act_count
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) :: sbound(6)
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
+                real(kind=8) intent(out),dimension(nreg,nsepv,nsepp),depend(nreg,nsepv,nsepp) :: touch
+            end subroutine rppi_Ajk_grid_wp_wg
+
+
+            subroutine rppi_Ajk_gmm_wp(nt,npt,dec,dc,dcang,x,y,z,kpdf,nlib,alpha,mu,sig,idx,reg,nreg,nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,cntid,logf,progressf,sk,ll,aapv,touch) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,mxh1,mxh2,mxh3,kpdf,nlib,nreg
+                real(kind=8) dimension(npt),depend(npt) :: dec,x,y,z,dc,dcang
+                real(kind=8) dimension(kpdf,nlib),depend(kpdf,nlib) :: alpha,mu,sig
+                integer dimension(npt),depend(npt) :: idx,reg
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch,probfloor
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
+                real(kind=8) intent(out),dimension(nreg,nsepv,nsepp),depend(nreg,nsepv,nsepp) :: touch
+            end subroutine rppi_Ajk_gmm_wp
+
+            subroutine rppi_Ajk_gmm_wp_wg(nt,npt,dec,dc,dcang,wei,x,y,z,kpdf,nlib,alpha,mu,sig,idx,reg,nreg,nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,wfib,cntid,logf,progressf,sk,ll,aapv,touch) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,mxh1,mxh2,mxh3,wfib,kpdf,nlib,nreg
+                real(kind=8) dimension(npt),depend(npt) :: dec,x,y,z,dc,dcang
+                real(kind=4) dimension(npt),depend(npt) :: wei
+                real(kind=8) dimension(kpdf,nlib),depend(kpdf,nlib) :: alpha,mu,sig
+                integer dimension(npt),depend(npt) :: idx,reg
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch,probfloor
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
+                real(kind=8) intent(out),dimension(nreg,nsepv,nsepp),depend(nreg,nsepv,nsepp) :: touch
+            end subroutine rppi_Ajk_gmm_wp_wg
+
+            subroutine rppi_Ab_gmm_wp(nt,npt,dec,dc,dcang,x,y,z,kpdf,nlib,alpha,mu,sig,idx,nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,nbts,bseed,cntid,logf,progressf,sk,ll,aapv,baapv) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,mxh1,mxh2,mxh3,kpdf,nlib,nbts,bseed
+                real(kind=8) dimension(npt),depend(npt) :: dec,x,y,z,dc,dcang
+                real(kind=8) dimension(kpdf,nlib),depend(kpdf,nlib) :: alpha,mu,sig
+                integer dimension(npt),depend(npt) :: idx
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch,probfloor
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
+                real(kind=8) intent(out),dimension(nbts,nsepp,nsepv),depend(nbts,nsepp,nsepv) :: baapv
+            end subroutine rppi_Ab_gmm_wp
+
+            subroutine rppi_Ab_gmm_wp_wg(nt,npt,dec,dc,dcang,wei,x,y,z,kpdf,nlib,alpha,mu,sig,idx,nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,nbts,bseed,wfib,cntid,logf,progressf,sk,ll,aapv,baapv,normb,sumwb) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,mxh1,mxh2,mxh3,kpdf,nlib,nbts,bseed,wfib
+                real(kind=8) dimension(npt),depend(npt) :: dec,x,y,z,dc,dcang
+                real(kind=4) dimension(npt),depend(npt) :: wei
+                real(kind=8) dimension(kpdf,nlib),depend(kpdf,nlib) :: alpha,mu,sig
+                integer dimension(npt),depend(npt) :: idx
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch,probfloor
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: aapv
+                real(kind=8) intent(out),dimension(nbts,nsepp,nsepv),depend(nbts,nsepp,nsepv) :: baapv
+                real(kind=8) intent(out),dimension(nbts),depend(nbts) :: normb,sumwb
+            end subroutine rppi_Ab_gmm_wp_wg
+
             subroutine rppi_Ab(nt,npt,dec,dc,x,y,z,nsepp,sepp,nsepv,sepv,sbound,mxh1,mxh2,mxh3,nbts,bseed,cntid,logf,progressf,sk,ll,aapv,baapv) ! in :cflibfor:cflibfor.f90:mod
                 integer :: nt,npt,mxh1,mxh2,mxh3,nbts,bseed
                 real(kind=8) dimension(npt),depend(npt) :: dec,x,y,z,dc
@@ -323,6 +666,412 @@ python module _cflibfor ! in
                 integer dimension(npt1),depend(npt1) :: ll1
                 real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
             end subroutine rppi_C_wg
+
+            subroutine rppi_C_gmm_wp(nt,npt,ra,dec,dc,dcang,x,y,z,kpdf,nlib,alpha,mu,sig,idx,npt1,dc1,dcang1,x1,y1,z1,kpdf1,nlib1,alpha1,mu1,sig1,idx1,nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,cntid,logf,progressf,sk1,ll1,cdpv) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,npt1,mxh1,mxh2,mxh3,kpdf,nlib,kpdf1,nlib1
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,dc,dcang,x,y,z
+                real(kind=8) dimension(kpdf,nlib),depend(kpdf,nlib) :: alpha,mu,sig
+                integer dimension(npt),depend(npt) :: idx
+                real(kind=8) dimension(npt1),depend(npt1) :: dc1,dcang1,x1,y1,z1
+                real(kind=8) dimension(kpdf1,nlib1),depend(kpdf1,nlib1) :: alpha1,mu1,sig1
+                integer dimension(npt1),depend(npt1) :: idx1
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch,probfloor
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
+            end subroutine rppi_C_gmm_wp
+
+
+            subroutine rppi_C_qchi_wp(nt,npt,ra,dec,dc,dcang,x,y,z,nq,nlib,qchi,qlo,qhi,idx,npt1,dc1,dcang1,x1,y1,z1,nq1,nlib1,qchi1,qlo1,qhi1,idx1,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,diag_enabled,cntid,logf,progressf,sk1,ll1,cdpv,qdiag) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,npt1,mxh1,mxh2,mxh3,nq,nlib,nq1,nlib1,diag_enabled
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,x,y,z,dc,dcang
+                real(kind=8) dimension(npt1),depend(npt1) :: x1,y1,z1,dc1,dcang1
+                real(kind=8) dimension(nq,nlib),depend(nq,nlib) :: qchi
+                real(kind=8) dimension(nlib),depend(nlib) :: qlo,qhi
+                real(kind=8) dimension(nq1,nlib1),depend(nq1,nlib1) :: qchi1
+                real(kind=8) dimension(nlib1),depend(nlib1) :: qlo1,qhi1
+                integer dimension(npt),depend(npt) :: idx
+                integer dimension(npt1),depend(npt1) :: idx1
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
+                integer(kind=8) intent(out),dimension(9) :: qdiag
+            end subroutine rppi_C_qchi_wp
+            subroutine rppi_C_qchi_wp_wg(nt,npt,ra,dec,dc,dcang,wei,x,y,z,nq,nlib,qchi,qlo,qhi,idx,npt1,dc1,dcang1,wei1,x1,y1,z1,nq1,nlib1,qchi1,qlo1,qhi1,idx1,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,wfib,diag_enabled,cntid,logf,progressf,sk1,ll1,cdpv,qdiag) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,npt1,mxh1,mxh2,mxh3,nq,nlib,nq1,nlib1,wfib,diag_enabled
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,x,y,z,dc,dcang
+                real(kind=4) dimension(npt),depend(npt) :: wei
+                real(kind=8) dimension(nq,nlib),depend(nq,nlib) :: qchi
+                real(kind=8) dimension(nlib),depend(nlib) :: qlo,qhi
+                integer dimension(npt),depend(npt) :: idx
+                real(kind=8) dimension(npt1),depend(npt1) :: x1,y1,z1,dc1,dcang1
+                real(kind=4) dimension(npt1),depend(npt1) :: wei1
+                real(kind=8) dimension(nq1,nlib1),depend(nq1,nlib1) :: qchi1
+                real(kind=8) dimension(nlib1),depend(nlib1) :: qlo1,qhi1
+                integer dimension(npt1),depend(npt1) :: idx1
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
+                integer(kind=8) intent(out),dimension(9) :: qdiag
+            end subroutine rppi_C_qchi_wp_wg
+
+            subroutine rppi_Cjk_qchi_wp(nt,npt,ra,dec,dc,dcang,x,y,z,nq,nlib,qchi,qlo,qhi,idx,reg,npt1,dc1,dcang1,x1,y1,z1,nq1,nlib1,qchi1,qlo1,qhi1,idx1,reg1,nreg,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,cntid,logf,progressf,sk1,ll1,cdpv,touch) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,npt1,mxh1,mxh2,mxh3,nq,nlib,nq1,nlib1,nreg
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,x,y,z,dc,dcang
+                real(kind=8) dimension(nq,nlib),depend(nq,nlib) :: qchi
+                real(kind=8) dimension(nlib),depend(nlib) :: qlo,qhi
+                integer dimension(npt),depend(npt) :: idx,reg
+                real(kind=8) dimension(npt1),depend(npt1) :: x1,y1,z1,dc1,dcang1
+                real(kind=8) dimension(nq1,nlib1),depend(nq1,nlib1) :: qchi1
+                real(kind=8) dimension(nlib1),depend(nlib1) :: qlo1,qhi1
+                integer dimension(npt1),depend(npt1) :: idx1,reg1
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
+                real(kind=8) intent(out),dimension(nreg,nsepv,nsepp),depend(nreg,nsepv,nsepp) :: touch
+            end subroutine rppi_Cjk_qchi_wp
+            subroutine rppi_Cb_qchi_wp(nt,npt,ra,dec,dc,dcang,x,y,z,nq,nlib,qchi,qlo,qhi,idx,npt1,dc1,dcang1,x1,y1,z1,nq1,nlib1,qchi1,qlo1,qhi1,idx1,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,nbts,bseed,cntid,logf,progressf,sk1,ll1,cdpv,bcdpv) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,npt1,mxh1,mxh2,mxh3,nq,nlib,nq1,nlib1,nbts,bseed
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,x,y,z,dc,dcang
+                real(kind=8) dimension(nq,nlib),depend(nq,nlib) :: qchi
+                real(kind=8) dimension(nlib),depend(nlib) :: qlo,qhi
+                integer dimension(npt),depend(npt) :: idx
+                real(kind=8) dimension(npt1),depend(npt1) :: x1,y1,z1,dc1,dcang1
+                real(kind=8) dimension(nq1,nlib1),depend(nq1,nlib1) :: qchi1
+                real(kind=8) dimension(nlib1),depend(nlib1) :: qlo1,qhi1
+                integer dimension(npt1),depend(npt1) :: idx1
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
+                real(kind=8) intent(out),dimension(nbts,nsepp,nsepv),depend(nbts,nsepp,nsepv) :: bcdpv
+            end subroutine rppi_Cb_qchi_wp
+
+            subroutine rppi_C_gmm_wp_wg(nt,npt,ra,dec,dc,dcang,wei,x,y,z,kpdf,nlib,alpha,mu,sig,idx,npt1,dc1,dcang1,wei1,x1,y1,z1,kpdf1,nlib1,alpha1,mu1,sig1,idx1,nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,wfib,cntid,logf,progressf,sk1,ll1,cdpv) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,npt1,mxh1,mxh2,mxh3,wfib,kpdf,nlib,kpdf1,nlib1
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,dc,dcang,x,y,z
+                real(kind=4) dimension(npt),depend(npt) :: wei
+                real(kind=8) dimension(kpdf,nlib),depend(kpdf,nlib) :: alpha,mu,sig
+                integer dimension(npt),depend(npt) :: idx
+                real(kind=8) dimension(npt1),depend(npt1) :: dc1,dcang1,x1,y1,z1
+                real(kind=4) dimension(npt1),depend(npt1) :: wei1
+                real(kind=8) dimension(kpdf1,nlib1),depend(kpdf1,nlib1) :: alpha1,mu1,sig1
+                integer dimension(npt1),depend(npt1) :: idx1
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch,probfloor
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
+            end subroutine rppi_C_gmm_wp_wg
+
+
+            subroutine rppi_C_grid_wp(nt,npt,ra,dec,dc,dcang,x,y,z,ngrid,nlib,grid,prob,lo,hi,idx,nact,act_idx,act_start,act_count,npt1,dc1,dcang1,x1,y1,z1,nlib1,cdf1,lo1,hi1,idx1,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,cntid,logf,progressf,sk1,ll1,cdpv) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,ngrid,nlib,npt1,nlib1,nsepp,nsepv,mxh1,mxh2,mxh3
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,dc,dcang,x,y,z
+                real(kind=8) dimension(ngrid),depend(ngrid) :: grid
+                real(kind=8) dimension(ngrid,nlib),depend(ngrid,nlib) :: prob
+                integer dimension(nlib),depend(nlib) :: lo,hi
+                integer dimension(npt),depend(npt) :: idx
+                integer intent(hide),depend(act_idx) :: nact=shape(act_idx,0)
+                integer dimension(nact),depend(nact) :: act_idx
+                integer dimension(nlib),depend(nlib) :: act_start,act_count
+                real(kind=8) dimension(npt1),depend(npt1) :: dc1,dcang1,x1,y1,z1
+                real(kind=8) dimension(ngrid,nlib1),depend(ngrid,nlib1) :: cdf1
+                integer dimension(nlib1),depend(nlib1) :: lo1,hi1
+                integer dimension(npt1),depend(npt1) :: idx1
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) :: sbound(6)
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
+            end subroutine rppi_C_grid_wp
+
+            subroutine rppi_C_grid_wp_wg(nt,npt,ra,dec,dc,dcang,wei,x,y,z,ngrid,nlib,grid,prob,lo,hi,idx,nact,act_idx,act_start,act_count,npt1,dc1,dcang1,wei1,x1,y1,z1,nlib1,cdf1,lo1,hi1,idx1,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,wfib,cntid,logf,progressf,sk1,ll1,cdpv) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,ngrid,nlib,npt1,nlib1,nsepp,nsepv,mxh1,mxh2,mxh3,wfib
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,dc,dcang,x,y,z
+                real(kind=4) dimension(npt),depend(npt) :: wei
+                real(kind=8) dimension(ngrid),depend(ngrid) :: grid
+                real(kind=8) dimension(ngrid,nlib),depend(ngrid,nlib) :: prob
+                integer dimension(nlib),depend(nlib) :: lo,hi
+                integer dimension(npt),depend(npt) :: idx
+                integer intent(hide),depend(act_idx) :: nact=shape(act_idx,0)
+                integer dimension(nact),depend(nact) :: act_idx
+                integer dimension(nlib),depend(nlib) :: act_start,act_count
+                real(kind=8) dimension(npt1),depend(npt1) :: dc1,dcang1,x1,y1,z1
+                real(kind=4) dimension(npt1),depend(npt1) :: wei1
+                real(kind=8) dimension(ngrid,nlib1),depend(ngrid,nlib1) :: cdf1
+                integer dimension(nlib1),depend(nlib1) :: lo1,hi1
+                integer dimension(npt1),depend(npt1) :: idx1
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) :: sbound(6)
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
+            end subroutine rppi_C_grid_wp_wg
+
+
+
+            subroutine rppi_Cb_grid_wp(nt,npt,ra,dec,dc,dcang,x,y,z,ngrid,nlib,grid,prob,lo,hi,idx,nact,act_idx,act_start,act_count,npt1,dc1,dcang1,x1,y1,z1,nlib1,cdf1,lo1,hi1,idx1,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,nbts,bseed,cntid,logf,progressf,sk1,ll1,cdpv,bcdpv) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,ngrid,nlib,npt1,nlib1,nsepp,nsepv,mxh1,mxh2,mxh3,nbts,bseed
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,dc,dcang,x,y,z
+                real(kind=8) dimension(ngrid),depend(ngrid) :: grid
+                real(kind=8) dimension(ngrid,nlib),depend(ngrid,nlib) :: prob
+                integer dimension(nlib),depend(nlib) :: lo,hi
+                integer dimension(npt),depend(npt) :: idx
+                integer intent(hide),depend(act_idx) :: nact=shape(act_idx,0)
+                integer dimension(nact),depend(nact) :: act_idx
+                integer dimension(nlib),depend(nlib) :: act_start,act_count
+                real(kind=8) dimension(npt1),depend(npt1) :: dc1,dcang1,x1,y1,z1
+                real(kind=8) dimension(ngrid,nlib1),depend(ngrid,nlib1) :: cdf1
+                integer dimension(nlib1),depend(nlib1) :: lo1,hi1
+                integer dimension(npt1),depend(npt1) :: idx1
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) :: sbound(6)
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
+                real(kind=8) intent(out),dimension(nbts,nsepp,nsepv),depend(nbts,nsepp,nsepv) :: bcdpv
+            end subroutine rppi_Cb_grid_wp
+
+            subroutine rppi_Cb_grid_wp_wg(nt,npt,ra,dec,dc,dcang,wei,x,y,z,ngrid,nlib,grid,prob,lo,hi,idx,nact,act_idx,act_start,act_count,npt1,dc1,dcang1,wei1,x1,y1,z1,nlib1,cdf1,lo1,hi1,idx1,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,nbts,bseed,wfib,cntid,logf,progressf,sk1,ll1,cdpv,bcdpv) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,ngrid,nlib,npt1,nlib1,nsepp,nsepv,mxh1,mxh2,mxh3,nbts,bseed,wfib
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,dc,dcang,x,y,z
+                real(kind=4) dimension(npt),depend(npt) :: wei
+                real(kind=8) dimension(ngrid),depend(ngrid) :: grid
+                real(kind=8) dimension(ngrid,nlib),depend(ngrid,nlib) :: prob
+                integer dimension(nlib),depend(nlib) :: lo,hi
+                integer dimension(npt),depend(npt) :: idx
+                integer intent(hide),depend(act_idx) :: nact=shape(act_idx,0)
+                integer dimension(nact),depend(nact) :: act_idx
+                integer dimension(nlib),depend(nlib) :: act_start,act_count
+                real(kind=8) dimension(npt1),depend(npt1) :: dc1,dcang1,x1,y1,z1
+                real(kind=4) dimension(npt1),depend(npt1) :: wei1
+                real(kind=8) dimension(ngrid,nlib1),depend(ngrid,nlib1) :: cdf1
+                integer dimension(nlib1),depend(nlib1) :: lo1,hi1
+                integer dimension(npt1),depend(npt1) :: idx1
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) :: sbound(6)
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
+                real(kind=8) intent(out),dimension(nbts,nsepp,nsepv),depend(nbts,nsepp,nsepv) :: bcdpv
+            end subroutine rppi_Cb_grid_wp_wg
+
+
+
+
+            subroutine rppi_Cjk_grid_wp(nt,npt,ra,dec,dc,dcang,x,y,z,ngrid,nlib,grid,prob,lo,hi,idx,nact,act_idx,act_start,act_count,reg,npt1,dc1,dcang1,x1,y1,z1,nlib1,cdf1,lo1,hi1,idx1,reg1,nreg,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,cntid,logf,progressf,sk1,ll1,cdpv,touch) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,ngrid,nlib,npt1,nlib1,nsepp,nsepv,mxh1,mxh2,mxh3,nreg
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,dc,dcang,x,y,z
+                real(kind=8) dimension(ngrid),depend(ngrid) :: grid
+                real(kind=8) dimension(ngrid,nlib),depend(ngrid,nlib) :: prob
+                integer dimension(nlib),depend(nlib) :: lo,hi
+                integer dimension(npt),depend(npt) :: idx,reg
+                integer intent(hide),depend(act_idx) :: nact=shape(act_idx,0)
+                integer dimension(nact),depend(nact) :: act_idx
+                integer dimension(nlib),depend(nlib) :: act_start,act_count
+                real(kind=8) dimension(npt1),depend(npt1) :: dc1,dcang1,x1,y1,z1
+                real(kind=8) dimension(ngrid,nlib1),depend(ngrid,nlib1) :: cdf1
+                integer dimension(nlib1),depend(nlib1) :: lo1,hi1
+                integer dimension(npt1),depend(npt1) :: idx1,reg1
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) :: sbound(6)
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
+                real(kind=8) intent(out),dimension(nreg,nsepv,nsepp),depend(nreg,nsepv,nsepp) :: touch
+            end subroutine rppi_Cjk_grid_wp
+
+            subroutine rppi_Cjk_grid_wp_wg(nt,npt,ra,dec,dc,dcang,wei,x,y,z,ngrid,nlib,grid,prob,lo,hi,idx,nact,act_idx,act_start,act_count,reg,npt1,dc1,dcang1,wei1,x1,y1,z1,nlib1,cdf1,lo1,hi1,idx1,reg1,nreg,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,wfib,cntid,logf,progressf,sk1,ll1,cdpv,touch) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,ngrid,nlib,npt1,nlib1,nsepp,nsepv,mxh1,mxh2,mxh3,wfib,nreg
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,dc,dcang,x,y,z
+                real(kind=4) dimension(npt),depend(npt) :: wei
+                real(kind=8) dimension(ngrid),depend(ngrid) :: grid
+                real(kind=8) dimension(ngrid,nlib),depend(ngrid,nlib) :: prob
+                integer dimension(nlib),depend(nlib) :: lo,hi
+                integer dimension(npt),depend(npt) :: idx,reg
+                integer intent(hide),depend(act_idx) :: nact=shape(act_idx,0)
+                integer dimension(nact),depend(nact) :: act_idx
+                integer dimension(nlib),depend(nlib) :: act_start,act_count
+                real(kind=8) dimension(npt1),depend(npt1) :: dc1,dcang1,x1,y1,z1
+                real(kind=4) dimension(npt1),depend(npt1) :: wei1
+                real(kind=8) dimension(ngrid,nlib1),depend(ngrid,nlib1) :: cdf1
+                integer dimension(nlib1),depend(nlib1) :: lo1,hi1
+                integer dimension(npt1),depend(npt1) :: idx1,reg1
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch
+                real(kind=8) :: sbound(6)
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
+                real(kind=8) intent(out),dimension(nreg,nsepv,nsepp),depend(nreg,nsepv,nsepp) :: touch
+            end subroutine rppi_Cjk_grid_wp_wg
+
+
+            subroutine rppi_Cjk_gmm_wp(nt,npt,ra,dec,dc,dcang,x,y,z,kpdf,nlib,alpha,mu,sig,idx,reg,npt1,dc1,dcang1,x1,y1,z1,kpdf1,nlib1,alpha1,mu1,sig1,idx1,reg1,nreg,nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,cntid,logf,progressf,sk1,ll1,cdpv,touch) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,npt1,mxh1,mxh2,mxh3,kpdf,nlib,kpdf1,nlib1,nreg
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,x,y,z,dc,dcang
+                integer dimension(npt),depend(npt) :: idx,reg
+                real(kind=8) dimension(npt1),depend(npt1) :: x1,y1,z1,dc1,dcang1
+                real(kind=8) dimension(kpdf,nlib),depend(kpdf,nlib) :: alpha,mu,sig
+                real(kind=8) dimension(kpdf1,nlib1),depend(kpdf1,nlib1) :: alpha1,mu1,sig1
+                integer dimension(npt1),depend(npt1) :: idx1,reg1
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch,probfloor
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
+                real(kind=8) intent(out),dimension(nreg,nsepv,nsepp),depend(nreg,nsepv,nsepp) :: touch
+            end subroutine rppi_Cjk_gmm_wp
+
+            subroutine rppi_Cjk_gmm_wp_wg(nt,npt,ra,dec,dc,dcang,wei,x,y,z,kpdf,nlib,alpha,mu,sig,idx,reg,npt1,dc1,dcang1,wei1,x1,y1,z1,kpdf1,nlib1,alpha1,mu1,sig1,idx1,reg1,nreg,nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,wfib,cntid,logf,progressf,sk1,ll1,cdpv,touch) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,npt1,mxh1,mxh2,mxh3,wfib,kpdf,nlib,kpdf1,nlib1,nreg
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,x,y,z,dc,dcang
+                real(kind=4) dimension(npt),depend(npt) :: wei
+                integer dimension(npt),depend(npt) :: idx,reg
+                real(kind=8) dimension(npt1),depend(npt1) :: x1,y1,z1,dc1,dcang1
+                real(kind=4) dimension(npt1),depend(npt1) :: wei1
+                real(kind=8) dimension(kpdf,nlib),depend(kpdf,nlib) :: alpha,mu,sig
+                real(kind=8) dimension(kpdf1,nlib1),depend(kpdf1,nlib1) :: alpha1,mu1,sig1
+                integer dimension(npt1),depend(npt1) :: idx1,reg1
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch,probfloor
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
+                real(kind=8) intent(out),dimension(nreg,nsepv,nsepp),depend(nreg,nsepv,nsepp) :: touch
+            end subroutine rppi_Cjk_gmm_wp_wg
+
+            subroutine rppi_Cb_gmm_wp(nt,npt,ra,dec,dc,dcang,x,y,z,kpdf,nlib,alpha,mu,sig,idx,npt1,dc1,dcang1,x1,y1,z1,kpdf1,nlib1,alpha1,mu1,sig1,idx1,nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,nbts,bseed,cntid,logf,progressf,sk1,ll1,cdpv,bcdpv) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,npt1,mxh1,mxh2,mxh3,kpdf,nlib,kpdf1,nlib1,nbts,bseed
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,dc,dcang,x,y,z
+                real(kind=8) dimension(npt1),depend(npt1) :: dc1,dcang1,x1,y1,z1
+                real(kind=8) dimension(kpdf,nlib),depend(kpdf,nlib) :: alpha,mu,sig
+                real(kind=8) dimension(kpdf1,nlib1),depend(kpdf1,nlib1) :: alpha1,mu1,sig1
+                integer dimension(npt),depend(npt) :: idx
+                integer dimension(npt1),depend(npt1) :: idx1
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch,probfloor
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
+                real(kind=8) intent(out),dimension(nbts,nsepp,nsepv),depend(nbts,nsepp,nsepv) :: bcdpv
+            end subroutine rppi_Cb_gmm_wp
+
+            subroutine rppi_Cb_gmm_wp_wg(nt,npt,ra,dec,dc,dcang,wei,x,y,z,kpdf,nlib,alpha,mu,sig,idx,npt1,dc1,dcang1,wei1,x1,y1,z1,kpdf1,nlib1,alpha1,mu1,sig1,idx1,nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,nbts,bseed,wfib,cntid,logf,progressf,sk1,ll1,cdpv,bcdpv) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,npt1,mxh1,mxh2,mxh3,kpdf,nlib,kpdf1,nlib1,nbts,bseed,wfib
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,dc,dcang,x,y,z
+                real(kind=4) dimension(npt),depend(npt) :: wei
+                real(kind=8) dimension(npt1),depend(npt1) :: dc1,dcang1,x1,y1,z1
+                real(kind=4) dimension(npt1),depend(npt1) :: wei1
+                real(kind=8) dimension(kpdf,nlib),depend(kpdf,nlib) :: alpha,mu,sig
+                real(kind=8) dimension(kpdf1,nlib1),depend(kpdf1,nlib1) :: alpha1,mu1,sig1
+                integer dimension(npt),depend(npt) :: idx
+                integer dimension(npt1),depend(npt1) :: idx1
+                integer :: nsepp,nsepv
+                real(kind=8) dimension(nsepp + 1),depend(nsepp) :: sepp
+                real(kind=8) dimension(nsepv + 1),depend(nsepv) :: sepv
+                real(kind=8) :: rvsearch,probfloor
+                real(kind=8) dimension(6) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh3,mxh2,mxh1),depend(mxh3,mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsepv,nsepp),depend(nsepv,nsepp) :: cdpv
+                real(kind=8) intent(out),dimension(nbts,nsepp,nsepv),depend(nbts,nsepp,nsepv) :: bcdpv
+            end subroutine rppi_Cb_gmm_wp_wg
 
             subroutine rppi_Cb(nt,npt,ra,dec,dc,x,y,z,npt1,dc1,x1,y1,z1,nsepp,sepp,nsepv,sepv,sbound,mxh1,mxh2,mxh3,nbts,bseed,cntid,logf,progressf,sk1,ll1,cdpv,bcdpv) ! in :cflibfor:cflibfor.f90:mod
                 integer :: nt,npt,npt1,mxh1,mxh2,mxh3,nbts,bseed

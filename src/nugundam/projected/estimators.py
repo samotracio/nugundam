@@ -30,26 +30,18 @@ def _boot_std(values):
 
 
 def _integrate_bootstrap(xi_boot: np.ndarray, pi_delta: np.ndarray) -> np.ndarray:
-    """
-    Integrate bootstrap.
-    
-    Parameters
-    ----------
-    xi_boot : object
-        Value for ``xi_boot``.
-    pi_delta : object
-        Value for ``pi_delta``.
-    
-    Returns
-    -------
-    object
-        Object returned by this helper.
-    
-    Notes
-    -----
-    Internal helper used by the refactored nuGUNDAM package.
-    """
+    """Integrate bootstrap ``xi(r_p, pi)`` realizations over all ``pi`` bins."""
     return 2.0 * np.sum(xi_boot * np.asarray(pi_delta, dtype=np.float64)[None, :, None], axis=1)
+
+
+def _cumulative_bootstrap(xi_boot: np.ndarray, pi_delta: np.ndarray) -> np.ndarray:
+    """Return cumulative bootstrap curves with shape ``(nboot, nrp, npi)``."""
+    delta = np.asarray(pi_delta, dtype=np.float64)
+    cumulative = 2.0 * np.cumsum(
+        np.asarray(xi_boot, dtype=np.float64) * delta[None, :, None],
+        axis=1,
+    )
+    return np.moveaxis(cumulative, 2, 0)
 
 
 def _normalize_auto_unweighted(counts: ProjectedAutoCounts):
@@ -177,7 +169,38 @@ def compute_auto_xi2d(counts: ProjectedAutoCounts, *, estimator: str, data_weigh
     return xi2d
 
 
-def estimate_auto(counts: ProjectedAutoCounts, *, estimator: str, data_weights: np.ndarray | None = None):
+def compute_auto_cumulative_wp(
+    counts: ProjectedAutoCounts,
+    *,
+    estimator: str,
+    data_weights: np.ndarray | None = None,
+    sum_w_data: float | None = None,
+    sum_w2_data: float | None = None,
+) -> np.ndarray:
+    """Compute central cumulative ``w_p(<Pi_max)`` for every ``r_p`` bin.
+
+    Returns an array with shape ``(n_rp, n_pi)``. The final column is the
+    fully integrated ``w_p`` corresponding to the configured line-of-sight
+    range.
+    """
+    xi2d = compute_auto_xi2d(
+        counts,
+        estimator=estimator,
+        data_weights=data_weights,
+        sum_w_data=sum_w_data,
+        sum_w2_data=sum_w2_data,
+    )
+    pi_delta = np.asarray(np.diff(counts.pi_edges), dtype=np.float64)
+    return 2.0 * np.cumsum(xi2d * pi_delta[None, :], axis=1)
+
+
+def estimate_auto(
+    counts: ProjectedAutoCounts,
+    *,
+    estimator: str,
+    data_weights: np.ndarray | None = None,
+    store_bootstrap_cumulative: bool = True,
+):
     """
     Evaluate the configured auto-correlation estimator from stored count terms.
     
@@ -189,6 +212,9 @@ def estimate_auto(counts: ProjectedAutoCounts, *, estimator: str, data_weights: 
         Value for ``estimator``. This argument is keyword-only.
     data_weights : object, optional
         Value for ``data_weights``. This argument is keyword-only.
+    store_bootstrap_cumulative : bool, default=True
+        Retain cumulative bootstrap realizations with shape
+        ``(n_bootstrap, n_rp, n_pi)`` when bootstrap counts are available.
     
     Returns
     -------
@@ -234,14 +260,24 @@ def estimate_auto(counts: ProjectedAutoCounts, *, estimator: str, data_weights: 
         else:
             raise ValueError(f"Unsupported projected auto estimator: {estimator}")
     wp = 2.0 * np.sum(xi2d * pi_delta[None, :], axis=1)
+    bootstrap_cumulative = None
     if bxi is not None:
-        bwp = _integrate_bootstrap(bxi, pi_delta)
-        xierr = np.std(bwp, axis=1)
+        if bool(store_bootstrap_cumulative):
+            bootstrap_cumulative = _cumulative_bootstrap(bxi, pi_delta)
+            bwp = bootstrap_cumulative[:, :, -1]
+        else:
+            bwp = _integrate_bootstrap(bxi, pi_delta).T
+        xierr = np.std(bwp, axis=0)
     metadata = {"weighted": data_weights is not None}
     if sum_w_data is not None:
         metadata["sum_w_data"] = sum_w_data
         metadata["sum_w2_data"] = sum_w2_data
-    return ProjectedCorrelationResult(rp_edges=counts.rp_edges, rp_centers=counts.rp_centers, wp=wp, wp_err=xierr, estimator=estimator, counts=counts, metadata=metadata)
+    result = ProjectedCorrelationResult(rp_edges=counts.rp_edges, rp_centers=counts.rp_centers, wp=wp, wp_err=xierr, estimator=estimator, counts=counts, metadata=metadata)
+    if bwp is not None:
+        result.bootstrap_realizations = np.asarray(bwp, dtype=np.float64)
+        if bootstrap_cumulative is not None:
+            result.bootstrap_cumulative_realizations = np.asarray(bootstrap_cumulative, dtype=np.float64)
+    return result
 
 
 def compute_cross_xi2d(counts: ProjectedCrossCounts, *, estimator: str, sum_w1: float | None = None, sum_w2: float | None = None) -> np.ndarray:
@@ -293,7 +329,37 @@ def compute_cross_xi2d(counts: ProjectedCrossCounts, *, estimator: str, sum_w1: 
     return xi2d
 
 
-def estimate_cross(counts: ProjectedCrossCounts, *, estimator: str, sum_w1: float | None = None, sum_w2: float | None = None):
+def compute_cross_cumulative_wp(
+    counts: ProjectedCrossCounts,
+    *,
+    estimator: str,
+    sum_w1: float | None = None,
+    sum_w2: float | None = None,
+) -> np.ndarray:
+    """Compute central cumulative ``w_p(<Pi_max)`` for every ``r_p`` bin.
+
+    Returns an array with shape ``(n_rp, n_pi)``. The final column is the
+    fully integrated ``w_p`` corresponding to the configured line-of-sight
+    range.
+    """
+    xi2d = compute_cross_xi2d(
+        counts,
+        estimator=estimator,
+        sum_w1=sum_w1,
+        sum_w2=sum_w2,
+    )
+    pi_delta = np.asarray(np.diff(counts.pi_edges), dtype=np.float64)
+    return 2.0 * np.cumsum(xi2d * pi_delta[None, :], axis=1)
+
+
+def estimate_cross(
+    counts: ProjectedCrossCounts,
+    *,
+    estimator: str,
+    sum_w1: float | None = None,
+    sum_w2: float | None = None,
+    store_bootstrap_cumulative: bool = True,
+):
     """
     Evaluate the configured cross-correlation estimator from stored count terms.
     
@@ -307,6 +373,9 @@ def estimate_cross(counts: ProjectedCrossCounts, *, estimator: str, sum_w1: floa
         Value for ``sum_w1``. This argument is keyword-only.
     sum_w2 : object, optional
         Value for ``sum_w2``. This argument is keyword-only.
+    store_bootstrap_cumulative : bool, default=True
+        Retain cumulative bootstrap realizations with shape
+        ``(n_bootstrap, n_rp, n_pi)`` when bootstrap counts are available.
     
     Returns
     -------
@@ -328,6 +397,7 @@ def estimate_cross(counts: ProjectedCrossCounts, *, estimator: str, sum_w1: floa
     pi_delta = np.asarray(counts.pi_edges[1:] - counts.pi_edges[:-1], dtype=np.float64)
     xi2d = np.zeros_like(counts.d1d2, dtype=np.float64)
     wp_err = np.zeros(counts.d1d2.shape[0], dtype=np.float64)
+    bwp = None
     if b_d1d2_n is not None:
         bxi = np.zeros_like(b_d1d2_n, dtype=np.float64)
     else:
@@ -354,12 +424,70 @@ def estimate_cross(counts: ProjectedCrossCounts, *, estimator: str, sum_w1: floa
         else:
             raise ValueError(f"Unsupported projected cross estimator: {estimator}")
     wp = 2.0 * np.sum(xi2d * pi_delta[None, :], axis=1)
+    bootstrap_cumulative = None
     if bxi is not None:
-        bwp = _integrate_bootstrap(bxi, pi_delta)
-        wp_err = np.std(bwp, axis=1)
+        if bool(store_bootstrap_cumulative):
+            bootstrap_cumulative = _cumulative_bootstrap(bxi, pi_delta)
+            bwp = bootstrap_cumulative[:, :, -1]
+        else:
+            bwp = _integrate_bootstrap(bxi, pi_delta).T
+        wp_err = np.std(bwp, axis=0)
     metadata = {"weighted": sum_w1 is not None or sum_w2 is not None}
     if sum_w1 is not None:
         metadata["sum_w1"] = float(sum_w1)
     if sum_w2 is not None:
         metadata["sum_w2"] = float(sum_w2)
-    return ProjectedCorrelationResult(rp_edges=counts.rp_edges, rp_centers=counts.rp_centers, wp=wp, wp_err=wp_err, estimator=estimator, counts=counts, metadata=metadata)
+    result = ProjectedCorrelationResult(rp_edges=counts.rp_edges, rp_centers=counts.rp_centers, wp=wp, wp_err=wp_err, estimator=estimator, counts=counts, metadata=metadata)
+    if bwp is not None:
+        result.bootstrap_realizations = np.asarray(bwp, dtype=np.float64)
+        if bootstrap_cumulative is not None:
+            result.bootstrap_cumulative_realizations = np.asarray(bootstrap_cumulative, dtype=np.float64)
+    return result
+
+
+def apply_bootstrap_storage_policy(result: ProjectedCorrelationResult, bootstrap_spec) -> ProjectedCorrelationResult:
+    """Apply projected-bootstrap retention settings to a completed result.
+
+    ``store_counts`` controls raw per-bootstrap count cubes. Standard and
+    deterministic-PDF runs keep those cubes inside ``result.counts``; the
+    MC-fast backend may instead attach a distinct ``result.bootstrap_counts``
+    object. ``store_cumulative`` controls the universal cumulative realization
+    array with shape ``(n_bootstrap, n_rp, n_pi)``.
+    """
+    store_counts = bool(getattr(bootstrap_spec, "store_counts", True))
+    store_cumulative = bool(getattr(bootstrap_spec, "store_cumulative", True))
+
+    if not store_cumulative:
+        result.bootstrap_cumulative_realizations = None
+
+    if not store_counts:
+        result.bootstrap_counts = None
+        counts = getattr(result, "counts", None)
+        if isinstance(counts, ProjectedAutoCounts):
+            counts.dd_boot = None
+            counts.norm_dd_boot = None
+            counts.sum_w_data_boot = None
+        elif isinstance(counts, ProjectedCrossCounts):
+            counts.d1d2_boot = None
+            counts.d1r2_boot = None
+
+    if bool(getattr(bootstrap_spec, "enabled", False)) or result.bootstrap_realizations is not None:
+        location = None
+        if result.bootstrap_counts is not None:
+            location = "bootstrap_counts"
+        elif isinstance(result.counts, ProjectedAutoCounts):
+            if result.counts.dd_boot is not None and result.counts.dd_boot.size > 0:
+                location = "counts"
+        elif isinstance(result.counts, ProjectedCrossCounts):
+            if result.counts.d1d2_boot is not None and result.counts.d1d2_boot.size > 0:
+                location = "counts"
+
+        result.metadata.update({
+            "bootstrap_store_counts": store_counts,
+            "bootstrap_store_cumulative": store_cumulative,
+            "bootstrap_counts_location": location,
+            "bootstrap_cumulative_available": (
+                result.bootstrap_cumulative_realizations is not None
+            ),
+        })
+    return result

@@ -27,7 +27,7 @@
   !           and paste back in cflibfor.pyf 
   !  Note 3 : There are some optimization options you can try
   !     > f2py -c --opt="-O3 -funroll-loops -march=corei7-avx -ftree-vectorize" [...]
-  !     > f2py -c --verbose --opt='-O3 -march=corei7-avx -ftree-vectorize -ftree-vectorizer-verbose=3 -fopt-info-vec-all -fdump-tree-vect' cflibfor.pyf cosmolib.f90 cflibfor.f90
+  !     > f2py -c --verbose ... cflibfor.pyf cosmolib.f90 cflibfor.f90
   ! 
   ! Contact Author
   !===============
@@ -41,6 +41,462 @@ real(kind=8) :: rad2deg = 180.d0/acos(-1.d0)
 
 contains
 
+!------------------------------------------------------------
+! Small numeric helpers
+real(kind=8) function normcdf(x)
+  implicit none
+  real(kind=8), intent(in) :: x
+  normcdf = 0.5d0 * (1.0d0 + erf(x / sqrt(2.0d0)))
+end function normcdf
+
+real(kind=8) function normprob_abs_le(edge, mu, sig)
+  implicit none
+  real(kind=8), intent(in) :: edge, mu, sig
+  if(edge<=0.0d0) then
+     normprob_abs_le = 0.0d0
+  else
+     normprob_abs_le = normcdf((edge - mu)/sig) - normcdf((-edge - mu)/sig)
+  endif
+end function normprob_abs_le
+
+real(kind=8) function gmm_abs_shell_prob(mu, sig, pi_lo, pi_hi)
+  implicit none
+  real(kind=8), intent(in) :: mu, sig, pi_lo, pi_hi
+  real(kind=8) :: lo, hi, amu, p
+  lo = max(0.0d0, pi_lo)
+  hi = max(0.0d0, pi_hi)
+  if(hi<=lo) then
+     gmm_abs_shell_prob = 0.0d0
+     return
+  endif
+  if(sig<=0.0d0) then
+     amu = abs(mu)
+     if(amu<=hi .and. (amu>lo .or. lo<=0.0d0)) then
+        gmm_abs_shell_prob = 1.0d0
+     else
+        gmm_abs_shell_prob = 0.0d0
+     endif
+  else
+     p = normprob_abs_le(hi, mu, sig) - normprob_abs_le(lo, mu, sig)
+     if(p<0.0d0 .and. p>-1.0d-14) p = 0.0d0
+     if(p>1.0d0 .and. p<1.0d0+1.0d-14) p = 1.0d0
+     gmm_abs_shell_prob = p
+  endif
+end function gmm_abs_shell_prob
+
+
+integer function lower_bound_r8(arr, value, ilo, ihi)
+  implicit none
+  real(kind=8), intent(in) :: arr(:), value
+  integer, intent(in) :: ilo, ihi
+  integer :: lo, hi, mid
+
+  lo = ilo
+  hi = ihi + 1
+  do while (lo < hi)
+     mid = (lo + hi) / 2
+     if (arr(mid) < value) then
+        lo = mid + 1
+     else
+        hi = mid
+     endif
+  enddo
+  lower_bound_r8 = lo
+end function lower_bound_r8
+
+
+integer function upper_bound_r8(arr, value, ilo, ihi)
+  implicit none
+  real(kind=8), intent(in) :: arr(:), value
+  integer, intent(in) :: ilo, ihi
+  integer :: lo, hi, mid
+
+  lo = ilo
+  hi = ihi + 1
+  do while (lo < hi)
+     mid = (lo + hi) / 2
+     if (arr(mid) <= value) then
+        lo = mid + 1
+     else
+        hi = mid
+     endif
+  enddo
+  upper_bound_r8 = lo
+end function upper_bound_r8
+
+
+subroutine accum_exact_grid_pair(nsepp,sepp2,nsepv,sepv,ang2,grid,prob_i,cdf_j,lo_i,hi_i,lo_j,hi_j,wpair,hist)
+  implicit none
+  integer, intent(in) :: nsepp, nsepv, lo_i, hi_i, lo_j, hi_j
+  real(kind=8), intent(in) :: sepp2(nsepp+1), sepv(nsepv+1), ang2, grid(:), prob_i(:), cdf_j(:), wpair
+  real(kind=8), intent(inout) :: hist(nsepv,nsepp)
+  integer :: gi, ii, ip, ie, jlo, jhi, ub, base_jlo, base_jhi
+  real(kind=8) :: p_i, chi_i, chi_lo_j, chi_hi_j, denom, low2, high2
+  real(kind=8) :: base_lo, base_hi, pedge, loe, hie, mass, cmass(nsepv+1)
+  real(kind=8) :: pimax, low_pm, high_pm, dmin, dmax, base_mass, rp2lo, rp2hi
+
+  if (ang2 <= 0.0d0) return
+  if (lo_i > hi_i .or. lo_j > hi_j) return
+
+  chi_lo_j = grid(lo_j)
+  chi_hi_j = grid(hi_j)
+  pimax = max(0.0d0, sepv(nsepv+1))
+
+  do gi = lo_i, hi_i
+     p_i = prob_i(gi)
+     if (p_i <= 0.0d0) cycle
+     chi_i = grid(gi)
+
+     low_pm = max(chi_lo_j, chi_i - pimax)
+     high_pm = min(chi_hi_j, chi_i + pimax)
+     if (low_pm > high_pm) cycle
+
+     denom = ang2 * chi_i
+     if (denom <= 0.0d0) cycle
+
+     rp2lo = ang2 * chi_i * low_pm
+     rp2hi = ang2 * chi_i * high_pm
+     if (rp2hi < sepp2(1) .or. rp2lo > sepp2(nsepp+1)) cycle
+
+     do ii = 1, nsepp
+        low2 = sepp2(ii) / denom
+        high2 = sepp2(ii+1) / denom
+        base_lo = max(low_pm, low2)
+        base_hi = min(high_pm, high2)
+        if (base_lo > base_hi) cycle
+
+        base_jlo = lower_bound_r8(grid, base_lo, lo_j, hi_j)
+        if (base_jlo > hi_j) cycle
+        ub = upper_bound_r8(grid, base_hi, lo_j, hi_j)
+        base_jhi = min(hi_j, ub - 1)
+        if (base_jhi < base_jlo) cycle
+        base_mass = cdf_j(base_jhi)
+        if (base_jlo > 1) base_mass = base_mass - cdf_j(base_jlo - 1)
+        if (base_mass <= 0.0d0) cycle
+
+        if (base_lo <= chi_i .and. chi_i <= base_hi) then
+           dmin = 0.0d0
+        else
+           dmin = min(abs(base_lo - chi_i), abs(base_hi - chi_i))
+        endif
+        dmax = max(abs(base_lo - chi_i), abs(base_hi - chi_i))
+
+        cmass = 0.0d0
+        do ie = 1, nsepv + 1
+           pedge = max(0.0d0, sepv(ie))
+           if (pedge <= dmin) cycle
+           if (pedge >= dmax) then
+              cmass(ie) = base_mass
+           else
+              loe = max(base_lo, chi_i - pedge)
+              hie = min(base_hi, chi_i + pedge)
+              if (loe > hie) cycle
+              jlo = lower_bound_r8(grid, loe, lo_j, hi_j)
+              if (jlo > hi_j) cycle
+              ub = upper_bound_r8(grid, hie, lo_j, hi_j)
+              jhi = min(hi_j, ub - 1)
+              if (jhi < jlo) cycle
+              cmass(ie) = cdf_j(jhi)
+              if (jlo > 1) cmass(ie) = cmass(ie) - cdf_j(jlo - 1)
+           endif
+        enddo
+
+        do ip = 1, nsepv
+           if (sepv(ip+1) <= sepv(ip)) cycle
+           mass = cmass(ip+1) - cmass(ip)
+           if (mass > 0.0d0) hist(ip,ii) = hist(ip,ii) + wpair * p_i * mass
+        enddo
+     enddo
+  enddo
+end subroutine accum_exact_grid_pair
+
+
+subroutine accum_exact_grid_pair_sparse(nsepp,sepp2,nsepv,sepv,ang2,grid,prob_i,cdf_j, &
+           act_idx,act_start,act_count,lo_j,hi_j,wpair,hist)
+  implicit none
+  integer, intent(in) :: nsepp, nsepv, act_start, act_count, lo_j, hi_j
+  integer, intent(in) :: act_idx(:)
+  real(kind=8), intent(in) :: sepp2(nsepp+1), sepv(nsepv+1), ang2, grid(:), prob_i(:), cdf_j(:), wpair
+  real(kind=8), intent(inout) :: hist(nsepv,nsepp)
+  integer :: aa, gi, ii, ip, ie, jlo, jhi, ub, aend, base_jlo, base_jhi
+  real(kind=8) :: p_i, chi_i, chi_lo_j, chi_hi_j, denom, low2, high2
+  real(kind=8) :: base_lo, base_hi, pedge, loe, hie, mass, cmass(nsepv+1)
+  real(kind=8) :: pimax, low_pm, high_pm, dmin, dmax, base_mass, rp2lo, rp2hi
+
+  if (ang2 <= 0.0d0) return
+  if (lo_j > hi_j) return
+  if (act_count <= 0) return
+
+  chi_lo_j = grid(lo_j)
+  chi_hi_j = grid(hi_j)
+  pimax = max(0.0d0, sepv(nsepv+1))
+  aend = act_start + act_count - 1
+
+  do aa = act_start, aend
+     gi = act_idx(aa)
+     p_i = prob_i(gi)
+     if (p_i <= 0.0d0) cycle
+     chi_i = grid(gi)
+
+     low_pm = max(chi_lo_j, chi_i - pimax)
+     high_pm = min(chi_hi_j, chi_i + pimax)
+     if (low_pm > high_pm) cycle
+
+     denom = ang2 * chi_i
+     if (denom <= 0.0d0) cycle
+
+     rp2lo = ang2 * chi_i * low_pm
+     rp2hi = ang2 * chi_i * high_pm
+     if (rp2hi < sepp2(1) .or. rp2lo > sepp2(nsepp+1)) cycle
+
+     do ii = 1, nsepp
+        low2 = sepp2(ii) / denom
+        high2 = sepp2(ii+1) / denom
+        base_lo = max(low_pm, low2)
+        base_hi = min(high_pm, high2)
+        if (base_lo > base_hi) cycle
+
+        base_jlo = lower_bound_r8(grid, base_lo, lo_j, hi_j)
+        if (base_jlo > hi_j) cycle
+        ub = upper_bound_r8(grid, base_hi, lo_j, hi_j)
+        base_jhi = min(hi_j, ub - 1)
+        if (base_jhi < base_jlo) cycle
+        base_mass = cdf_j(base_jhi)
+        if (base_jlo > 1) base_mass = base_mass - cdf_j(base_jlo - 1)
+        if (base_mass <= 0.0d0) cycle
+
+        if (base_lo <= chi_i .and. chi_i <= base_hi) then
+           dmin = 0.0d0
+        else
+           dmin = min(abs(base_lo - chi_i), abs(base_hi - chi_i))
+        endif
+        dmax = max(abs(base_lo - chi_i), abs(base_hi - chi_i))
+
+        cmass = 0.0d0
+        do ie = 1, nsepv + 1
+           pedge = max(0.0d0, sepv(ie))
+           if (pedge <= dmin) cycle
+           if (pedge >= dmax) then
+              cmass(ie) = base_mass
+           else
+              loe = max(base_lo, chi_i - pedge)
+              hie = min(base_hi, chi_i + pedge)
+              if (loe > hie) cycle
+              jlo = lower_bound_r8(grid, loe, lo_j, hi_j)
+              if (jlo > hi_j) cycle
+              ub = upper_bound_r8(grid, hie, lo_j, hi_j)
+              jhi = min(hi_j, ub - 1)
+              if (jhi < jlo) cycle
+              cmass(ie) = cdf_j(jhi)
+              if (jlo > 1) cmass(ie) = cmass(ie) - cdf_j(jlo - 1)
+           endif
+        enddo
+
+        do ip = 1, nsepv
+           if (sepv(ip+1) <= sepv(ip)) cycle
+           mass = cmass(ip+1) - cmass(ip)
+           if (mass > 0.0d0) hist(ip,ii) = hist(ip,ii) + wpair * p_i * mass
+        enddo
+     enddo
+  enddo
+end subroutine accum_exact_grid_pair_sparse
+
+
+subroutine accum_exact_grid_pair_sparse_touch(nsepp,sepp2,nsepv,sepv,ang2,grid,prob_i,cdf_j, &
+           act_idx,act_start,act_count,lo_j,hi_j,wpair,nreg,regi,regj,hist,touch)
+  implicit none
+  integer, intent(in) :: nsepp, nsepv, act_start, act_count, lo_j, hi_j, nreg, regi, regj
+  integer, intent(in) :: act_idx(:)
+  real(kind=8), intent(in) :: sepp2(nsepp+1), sepv(nsepv+1), ang2, grid(:), prob_i(:), cdf_j(:), wpair
+  real(kind=8), intent(inout) :: hist(nsepv,nsepp), touch(nreg,nsepv,nsepp)
+  integer :: aa, gi, ii, ip, ie, jlo, jhi, ub, aend, base_jlo, base_jhi
+  real(kind=8) :: p_i, chi_i, chi_lo_j, chi_hi_j, denom, low2, high2
+  real(kind=8) :: base_lo, base_hi, pedge, loe, hie, mass, cmass(nsepv+1)
+  real(kind=8) :: pimax, low_pm, high_pm, dmin, dmax, base_mass, rp2lo, rp2hi, contrib
+
+  if (ang2 <= 0.0d0) return
+  if (lo_j > hi_j) return
+  if (act_count <= 0) return
+
+  chi_lo_j = grid(lo_j)
+  chi_hi_j = grid(hi_j)
+  pimax = max(0.0d0, sepv(nsepv+1))
+  aend = act_start + act_count - 1
+
+  do aa = act_start, aend
+     gi = act_idx(aa)
+     p_i = prob_i(gi)
+     if (p_i <= 0.0d0) cycle
+     chi_i = grid(gi)
+
+     low_pm = max(chi_lo_j, chi_i - pimax)
+     high_pm = min(chi_hi_j, chi_i + pimax)
+     if (low_pm > high_pm) cycle
+
+     denom = ang2 * chi_i
+     if (denom <= 0.0d0) cycle
+
+     rp2lo = ang2 * chi_i * low_pm
+     rp2hi = ang2 * chi_i * high_pm
+     if (rp2hi < sepp2(1) .or. rp2lo > sepp2(nsepp+1)) cycle
+
+     do ii = 1, nsepp
+        low2 = sepp2(ii) / denom
+        high2 = sepp2(ii+1) / denom
+        base_lo = max(low_pm, low2)
+        base_hi = min(high_pm, high2)
+        if (base_lo > base_hi) cycle
+
+        base_jlo = lower_bound_r8(grid, base_lo, lo_j, hi_j)
+        if (base_jlo > hi_j) cycle
+        ub = upper_bound_r8(grid, base_hi, lo_j, hi_j)
+        base_jhi = min(hi_j, ub - 1)
+        if (base_jhi < base_jlo) cycle
+        base_mass = cdf_j(base_jhi)
+        if (base_jlo > 1) base_mass = base_mass - cdf_j(base_jlo - 1)
+        if (base_mass <= 0.0d0) cycle
+
+        if (base_lo <= chi_i .and. chi_i <= base_hi) then
+           dmin = 0.0d0
+        else
+           dmin = min(abs(base_lo - chi_i), abs(base_hi - chi_i))
+        endif
+        dmax = max(abs(base_lo - chi_i), abs(base_hi - chi_i))
+
+        cmass = 0.0d0
+        do ie = 1, nsepv + 1
+           pedge = max(0.0d0, sepv(ie))
+           if (pedge <= dmin) cycle
+           if (pedge >= dmax) then
+              cmass(ie) = base_mass
+           else
+              loe = max(base_lo, chi_i - pedge)
+              hie = min(base_hi, chi_i + pedge)
+              if (loe > hie) cycle
+              jlo = lower_bound_r8(grid, loe, lo_j, hi_j)
+              if (jlo > hi_j) cycle
+              ub = upper_bound_r8(grid, hie, lo_j, hi_j)
+              jhi = min(hi_j, ub - 1)
+              if (jhi < jlo) cycle
+              cmass(ie) = cdf_j(jhi)
+              if (jlo > 1) cmass(ie) = cmass(ie) - cdf_j(jlo - 1)
+           endif
+        enddo
+
+        do ip = 1, nsepv
+           if (sepv(ip+1) <= sepv(ip)) cycle
+           mass = cmass(ip+1) - cmass(ip)
+           if (mass > 0.0d0) then
+              contrib = wpair * p_i * mass
+              hist(ip,ii) = hist(ip,ii) + contrib
+              if (regi >= 1 .and. regi <= nreg) touch(regi,ip,ii) = touch(regi,ip,ii) + contrib
+              if (regj /= regi .and. regj >= 1 .and. regj <= nreg) then
+                 touch(regj,ip,ii) = touch(regj,ip,ii) + contrib
+              endif
+           endif
+        enddo
+     enddo
+  enddo
+end subroutine accum_exact_grid_pair_sparse_touch
+
+
+
+subroutine accum_exact_grid_pair_sparse_boot(nsepp,sepp2,nsepv,sepv,ang2,grid,prob_i,cdf_j, &
+           act_idx,act_start,act_count,lo_j,hi_j,wpair,nbts,wbtsi,wbtsj,hist,bhist)
+  implicit none
+  integer, intent(in) :: nsepp, nsepv, act_start, act_count, lo_j, hi_j, nbts
+  integer, intent(in) :: act_idx(:)
+  real(kind=8), intent(in) :: sepp2(nsepp+1), sepv(nsepv+1), ang2, grid(:), prob_i(:), cdf_j(:), wpair
+  real(kind=4), intent(in) :: wbtsi(nbts), wbtsj(nbts)
+  real(kind=8), intent(inout) :: hist(nsepv,nsepp), bhist(nbts,nsepp,nsepv)
+  integer :: aa, gi, ii, ip, ie, jlo, jhi, ub, aend, base_jlo, base_jhi, ib
+  real(kind=8) :: p_i, chi_i, chi_lo_j, chi_hi_j, denom, low2, high2
+  real(kind=8) :: base_lo, base_hi, pedge, loe, hie, mass, cmass(nsepv+1)
+  real(kind=8) :: pimax, low_pm, high_pm, dmin, dmax, base_mass, rp2lo, rp2hi, contrib
+
+  if (ang2 <= 0.0d0) return
+  if (lo_j > hi_j) return
+  if (act_count <= 0) return
+
+  chi_lo_j = grid(lo_j)
+  chi_hi_j = grid(hi_j)
+  pimax = max(0.0d0, sepv(nsepv+1))
+  aend = act_start + act_count - 1
+
+  do aa = act_start, aend
+     gi = act_idx(aa)
+     p_i = prob_i(gi)
+     if (p_i <= 0.0d0) cycle
+     chi_i = grid(gi)
+
+     low_pm = max(chi_lo_j, chi_i - pimax)
+     high_pm = min(chi_hi_j, chi_i + pimax)
+     if (low_pm > high_pm) cycle
+
+     denom = ang2 * chi_i
+     if (denom <= 0.0d0) cycle
+
+     rp2lo = ang2 * chi_i * low_pm
+     rp2hi = ang2 * chi_i * high_pm
+     if (rp2hi < sepp2(1) .or. rp2lo > sepp2(nsepp+1)) cycle
+
+     do ii = 1, nsepp
+        low2 = sepp2(ii) / denom
+        high2 = sepp2(ii+1) / denom
+        base_lo = max(low_pm, low2)
+        base_hi = min(high_pm, high2)
+        if (base_lo > base_hi) cycle
+
+        base_jlo = lower_bound_r8(grid, base_lo, lo_j, hi_j)
+        if (base_jlo > hi_j) cycle
+        ub = upper_bound_r8(grid, base_hi, lo_j, hi_j)
+        base_jhi = min(hi_j, ub - 1)
+        if (base_jhi < base_jlo) cycle
+        base_mass = cdf_j(base_jhi)
+        if (base_jlo > 1) base_mass = base_mass - cdf_j(base_jlo - 1)
+        if (base_mass <= 0.0d0) cycle
+
+        if (base_lo <= chi_i .and. chi_i <= base_hi) then
+           dmin = 0.0d0
+        else
+           dmin = min(abs(base_lo - chi_i), abs(base_hi - chi_i))
+        endif
+        dmax = max(abs(base_lo - chi_i), abs(base_hi - chi_i))
+
+        cmass = 0.0d0
+        do ie = 1, nsepv + 1
+           pedge = max(0.0d0, sepv(ie))
+           if (pedge <= dmin) cycle
+           if (pedge >= dmax) then
+              cmass(ie) = base_mass
+           else
+              loe = max(base_lo, chi_i - pedge)
+              hie = min(base_hi, chi_i + pedge)
+              if (loe > hie) cycle
+              jlo = lower_bound_r8(grid, loe, lo_j, hi_j)
+              if (jlo > hi_j) cycle
+              ub = upper_bound_r8(grid, hie, lo_j, hi_j)
+              jhi = min(hi_j, ub - 1)
+              if (jhi < jlo) cycle
+              cmass(ie) = cdf_j(jhi)
+              if (jlo > 1) cmass(ie) = cmass(ie) - cdf_j(jlo - 1)
+           endif
+        enddo
+
+        do ip = 1, nsepv
+           if (sepv(ip+1) <= sepv(ip)) cycle
+           mass = cmass(ip+1) - cmass(ip)
+           if (mass > 0.0d0) then
+              contrib = wpair * p_i * mass
+              hist(ip,ii) = hist(ip,ii) + contrib
+              do ib = 1, nbts
+                 bhist(ib,ii,ip) = bhist(ib,ii,ip) + contrib*dble(wbtsi(ib))*dble(wbtsj(ib))
+              enddo
+           endif
+        enddo
+     enddo
+  enddo
+end subroutine accum_exact_grid_pair_sparse_boot
 
 subroutine write_progress_header(cntid,nstrip,progressf)
 implicit none
@@ -219,6 +675,32 @@ do nb=1,nboot
 enddo
 
 end subroutine bootstrap
+
+subroutine bootstrap_weight_stats(npt,nboot,wei,w,sumwb,normb)
+  !=======================================================================
+  ! PURPOSE
+  !  Compute weighted bootstrap normalization terms from multiplicities.
+implicit none
+integer       :: npt,nboot,i,nb
+real(kind=4)  :: wei(npt),w(nboot,npt)
+real(kind=8)  :: sumwb(nboot),normb(nboot),sw,sw2,wi
+
+sumwb = 0.0d0
+normb = 0.0d0
+
+do nb=1,nboot
+   sw = 0.0d0
+   sw2 = 0.0d0
+   do i=1,npt
+      wi = dble(wei(i))*dble(w(nb,i))
+      sw = sw + wi
+      sw2 = sw2 + wi*wi
+   enddo
+   sumwb(nb) = sw
+   normb(nb) = 0.5d0*(sw*sw - sw2)
+enddo
+
+end subroutine bootstrap_weight_stats
 
 real(kind=8) function sthmax2(rpmax,rg,rkl)
   ! Auxiliary routine used by counting routines
@@ -1879,9 +2361,13 @@ dcoml = sbound(5) ; dcomu = sbound(6)
 
 !------------------------------------
 ! Get nc3
-rvmax = sepv(nsepv+1)
-nc3   = int((dcomu-dcoml)/rvmax)
-if(nc3>mxh3) nc3=mxh3
+	rvmax = sepv(nsepv+1)
+	! Guard against rvmax exceeding the distance span, which can yield nc3==0
+	! and cause division-by-zero (hc3) and an empty SK table.
+	if(rvmax<=0.0d0) rvmax = 1.0d-9
+	nc3   = int((dcomu-dcoml)/rvmax)
+	if(nc3<1) nc3 = 1
+	if(nc3>mxh3) nc3=mxh3
 
 !-------------------------------------
 ! Get cell dimensions in (dec,ra,dcom)
@@ -2007,8 +2493,13 @@ ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
 dcoml = sbound(5) ; dcomu = sbound(6)
 nc1 = mxh1
 nc2 = mxh2
-nc3 = int((dcomu-dcoml)/rvmax)
-if(nc3>mxh3) nc3 = mxh3
+	! NOTE: When rvmax (search depth) exceeds the full distance span,
+	! int((dcomu-dcoml)/rvmax) can become 0, which would skip the iq3 loop
+	! entirely and yield zero counts. Guard against this by enforcing nc3>=1.
+	if(rvmax<=0.0d0) rvmax = 1.0d-9
+	nc3 = int((dcomu-dcoml)/rvmax)
+	if(nc3<1) nc3 = 1
+	if(nc3>mxh3) nc3 = mxh3
 hc1 = (decu-decl)/float(nc1)     !effective nr of DEC cells
 hc2 = (rau-ral)/float(nc2)       !effective nr of RA cells
 hc3 = (dcomu-dcoml)/float(nc3)   !effective nr of DCOM cells
@@ -2195,8 +2686,11 @@ ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
 dcoml = sbound(5) ; dcomu = sbound(6)
 nc1 = mxh1
 nc2 = mxh2
-nc3 = int((dcomu-dcoml)/rvmax)
-if(nc3>mxh3) nc3 = mxh3
+	! Guard against nc3==0 when rvmax exceeds the distance span.
+	if(rvmax<=0.0d0) rvmax = 1.0d-9
+	nc3 = int((dcomu-dcoml)/rvmax)
+	if(nc3<1) nc3 = 1
+	if(nc3>mxh3) nc3 = mxh3
 hc1 = (decu-decl)/float(nc1)     !effective nr of DEC cells
 hc2 = (rau-ral)/float(nc2)       !effective nr of RA cells
 hc3 = (dcomu-dcoml)/float(nc3)   !effective nr of DCOM cells
@@ -2310,6 +2804,2874 @@ close(11)  ! close log
 if(len_trim(progressf)==0) write(*,*) ' '
 end subroutine rppi_A_wg
 
+subroutine rppi_A_gmm_wp(nt,npt,dec,dc,dcang,x,y,z,kpdf,nlib,alpha,mu,sig,idx, &
+           nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3, &
+           cntid,logf,progressf,sk,ll,aapv)
+!===============================================================================
+! NAME
+!  rppi_A_gmm_wp()
+!
+! DESCRIPTION
+!  Count expected data-data pairs in projected space for ONE sample of particles
+!  when each particle carries a small Gaussian-mixture PDF in comoving distance.
+!  v1: wp(rp)-only mode (nsepv must be 1). The pi bin is [0, sepv(2)].
+!
+! NOTES
+!  * The 3D SK/LL grid must be built using rvsearch (search depth), while the
+!    output pi edge (sepv) controls the |dchi| integration bound (pimax).
+!
+implicit none
+integer       :: nt,nthr,npt,nsepp,nsepv,mxh1,mxh2,mxh3,kpdf,nlib
+real(kind=8)  :: dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: alpha(kpdf,nlib),mu(kpdf,nlib),sig(kpdf,nlib),sepp(nsepp+1),sepv(nsepv+1)
+integer       :: idx(npt)
+real(kind=8)  :: sbound(6),aapv(nsepv,nsepp)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3,rp2
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,yi,zi,dc_i,ang2
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rvmax,rv,rvsearch,probfloor
+real(kind=8)  :: muD,sigD,ppi,wcomp
+integer       :: sk(mxh3,mxh2,mxh1),ll(npt),nc1,nc2,nc3
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq1min,jq2min,jq2max,jq2t,jq1m,jq2m
+integer       :: ilib,jlib,kk,llc,ip,ibin
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+! Reset counts, set rpmax and rvmax
+aapv   = 0.0d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+rvmax  = rvsearch
+
+! Unpack boundaries and get cell dimensions in (dec,ra,dcom)
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+	! Guard against nc3==0 when rvmax exceeds the distance span.
+	if(rvmax<=0.0d0) rvmax = 1.0d-9
+	nc3 = int((dcomu-dcoml)/rvmax)
+	if(nc3<1) nc3 = 1
+	if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+! Threads
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:aapv) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m,jq1min) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,yi,zi,dc_i,rv,ang2,ii) &
+!$omp& private(ilib,jlib,kk,llc,ip,ibin,muD,sigD,ppi,wcomp,rp2) &
+!$omp& schedule(dynamic) if(nthr>1)
+do iq1=1,nc1
+   !$omp critical
+   call write_progress_stripe(cntid,iq1,mxh1,progressf)
+   write(11,*) cntid//' counting in DEC strip > ',iq1,'/',mxh1
+   flush(11)
+   !$omp end critical
+   do iq2=1,nc2
+      do iq3=1,nc3
+         i = sk(iq3,iq2,iq1)
+         do while(i/=0)
+            lp_jq3: do jq3=iq3,iq3+1
+               if(jq3>nc3) cycle lp_jq3
+               rcl    = (jq3-1)*hc3+dcoml
+               stm2   = sthmax2(rpmax,dcang(i),rcl)
+               dltdec = 2.0d0*asin(stm2)*rad2deg
+               jq1m   = int(dltdec/hc1)+1
+               if(jq3==iq3) then
+                  jq1min = iq1
+               else
+                  jq1min = iq1-jq1m
+               end if
+               lp_jq1: do jq1=jq1min,iq1+jq1m
+                  if(jq1>nc1.or.jq1<1) cycle lp_jq1
+                  if(jq1==iq1) then
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+                  else
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+                  end if
+                  jq2m   = int(dltra/hc2)+1
+                  jq2max = iq2+jq2m
+                  jq2min = iq2-jq2m
+                  if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+                  lp_jq2: do jq2=jq2min,jq2max
+                     if(jq2>nc2) then
+                        jq2t = jq2-nc2
+                     else if(jq2<1) then
+                        jq2t = jq2+nc2
+                     else
+                        jq2t = jq2
+                     end if
+                     if(jq3==iq3.and.jq2t<iq2.and.jq1==iq1) cycle lp_jq2
+                     if(jq3==iq3.and.jq2t==iq2.and.jq1==iq1) then
+                        j = ll(i)
+                     else
+                        j = sk(jq3,jq2t,jq1)
+                     endif
+                     xi  = x(i)
+                     yi  = y(i)
+                     zi  = z(i)
+                     dc_i = dc(i)
+                     ilib = idx(i)
+
+                     do while(j/=0)
+                        rv = abs(dc_i-dc(j))
+                        if(rv<=rvmax) then
+                           ang2 = ((xi-x(j))**2 + (yi-y(j))**2 + (zi-z(j))**2)
+                           if(ang2>0.0d0) then
+                              jlib = idx(j)
+                              do kk=1,kpdf
+                                 do llc=1,kpdf
+                                    wcomp = alpha(kk,ilib)*alpha(llc,jlib)
+                                    if(wcomp<=probfloor) cycle
+                                    rp2 = mu(kk,ilib)*mu(llc,jlib)*ang2
+                                    if(rp2>rpmax2) cycle
+
+                                    muD = mu(kk,ilib) - mu(llc,jlib)
+                                    sigD = sqrt(sig(kk,ilib)*sig(kk,ilib) + sig(llc,jlib)*sig(llc,jlib))
+
+                                    ibin = 0
+                                    if(rp2>sepp2(nsepp)) then
+                                       ibin = nsepp
+                                    else
+                                       do ii=nsepp-1,1,-1
+                                          if(rp2>sepp2(ii)) then
+                                             ibin = ii
+                                             exit
+                                          endif
+                                       enddo
+                                    endif
+                                    if(ibin<=0) cycle
+
+                                    do ip=1,nsepv
+                                       ppi = gmm_abs_shell_prob(muD, sigD, sepv(ip), sepv(ip+1))
+                                       if ((nsepv == 1 .and. ppi > probfloor) .or. &
+                                           (nsepv > 1 .and. ppi > 0.0d0)) then
+                                          aapv(ip,ibin) = aapv(ip,ibin) + wcomp*ppi
+                                       endif
+                                    enddo
+                                 enddo
+                              enddo
+                           endif
+                        else
+                           if(jq3>iq3) cycle lp_jq2
+                        endif
+                        j = ll(j)
+                     end do
+
+                  end do lp_jq2
+               end do lp_jq1
+            end do lp_jq3
+            i = ll(i)
+         end do
+      end do
+   end do
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_A_gmm_wp
+
+
+
+subroutine rppi_A_qchi_wp(nt,npt,dec,dc,dcang,x,y,z,nq,nlib,qchi,qlo,qhi,idx, &
+           nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,diag_enabled, &
+           cntid,logf,progressf,sk,ll,aapv,qdiag)
+!===============================================================================
+! NAME
+!  rppi_A_qchi_wp()
+!
+! DESCRIPTION
+!  Count expected data-data pairs in projected space for ONE sample when each
+!  particle carries equal-probability chi quantiles.  This is the first
+!  performance-gated 16Quant/quantile_chi kernel: it keeps the normal SK/LL
+!  pruning and adds quantile-support pruning before the nq*nq product.
+!
+implicit none
+integer       :: nt,nthr,npt,nsepp,nsepv,mxh1,mxh2,mxh3,nq,nlib,diag_enabled
+real(kind=8)  :: dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: qchi(nq,nlib),qlo(nlib),qhi(nlib),sepp(nsepp+1),sepv(nsepv+1)
+integer       :: idx(npt)
+real(kind=8)  :: sbound(6),aapv(nsepv,nsepp)
+integer(kind=8) :: qdiag(9)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3,rp2
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,yi,zi,dc_i,ang2
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rpmin2,rvmax,rv,rvsearch,pimax,dsepv
+real(kind=8)  :: qlo_i,qhi_i,qlo_j,qhi_j,rp2_min,rp2_max,chi_i,chi_j,qpi,wq
+integer       :: sk(mxh3,mxh2,mxh1),ll(npt),nc1,nc2,nc3
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq1min,jq2min,jq2max,jq2t,jq1m,jq2m
+integer       :: ilib,jlib,qa,qb,ip,ibin
+integer(kind=8) :: nscan,nrv,npi_supp,nang_zero,nrp_supp,nprod,nqpi,nqrp,nacc
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+aapv   = 0.0d0
+qdiag  = 0_8
+nscan = 0_8 ; nrv = 0_8 ; npi_supp = 0_8 ; nang_zero = 0_8
+nrp_supp = 0_8 ; nprod = 0_8 ; nqpi = 0_8 ; nqrp = 0_8 ; nacc = 0_8
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+rpmin2 = sepp2(1)
+rvmax  = rvsearch
+pimax  = sepv(nsepv+1)
+if(nsepv>0) then
+   dsepv = sepv(2)-sepv(1)
+else
+   dsepv = 1.0d0
+endif
+wq     = 1.0d0 / dble(nq*nq)
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:aapv,nscan,nrv,npi_supp,nang_zero,nrp_supp,nprod,nqpi,nqrp,nacc) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m,jq1min) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,yi,zi,dc_i,rv,ang2,ii) &
+!$omp& private(ilib,jlib,qa,qb,ip,ibin,rp2,qpi,chi_i,chi_j) &
+!$omp& private(qlo_i,qhi_i,qlo_j,qhi_j,rp2_min,rp2_max) &
+!$omp& schedule(dynamic) if(nthr>1)
+do iq1=1,nc1
+   !$omp critical
+   call write_progress_stripe(cntid,iq1,mxh1,progressf)
+   write(11,*) cntid//' counting in DEC strip > ',iq1,'/',mxh1
+   flush(11)
+   !$omp end critical
+   do iq2=1,nc2
+      do iq3=1,nc3
+         i = sk(iq3,iq2,iq1)
+         do while(i/=0)
+            lp_jq3: do jq3=iq3,iq3+1
+               if(jq3>nc3) cycle lp_jq3
+               rcl    = (jq3-1)*hc3+dcoml
+               stm2   = sthmax2(rpmax,dcang(i),rcl)
+               dltdec = 2.0d0*asin(stm2)*rad2deg
+               jq1m   = int(dltdec/hc1)+1
+               if(jq3==iq3) then
+                  jq1min = iq1
+               else
+                  jq1min = iq1-jq1m
+               end if
+               lp_jq1: do jq1=jq1min,iq1+jq1m
+                  if(jq1>nc1.or.jq1<1) cycle lp_jq1
+                  if(jq1==iq1) then
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+                  else
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+                  end if
+                  jq2m   = int(dltra/hc2)+1
+                  jq2max = iq2+jq2m
+                  jq2min = iq2-jq2m
+                  if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+                  lp_jq2: do jq2=jq2min,jq2max
+                     if(jq2>nc2) then
+                        jq2t = jq2-nc2
+                     else if(jq2<1) then
+                        jq2t = jq2+nc2
+                     else
+                        jq2t = jq2
+                     end if
+                     if(jq3==iq3.and.jq2t<iq2.and.jq1==iq1) cycle lp_jq2
+                     if(jq3==iq3.and.jq2t==iq2.and.jq1==iq1) then
+                        j = ll(i)
+                     else
+                        j = sk(jq3,jq2t,jq1)
+                     endif
+                     xi  = x(i)
+                     yi  = y(i)
+                     zi  = z(i)
+                     dc_i = dc(i)
+                     ilib = idx(i)
+                     qlo_i = qlo(ilib)
+                     qhi_i = qhi(ilib)
+
+                     do while(j/=0)
+                        if(diag_enabled/=0) nscan = nscan + 1_8
+                        rv = abs(dc_i-dc(j))
+                        if(rv<=rvmax) then
+                           if(diag_enabled/=0) nrv = nrv + 1_8
+                           jlib = idx(j)
+                           qlo_j = qlo(jlib)
+                           qhi_j = qhi(jlib)
+                           if(qhi_i < qlo_j-pimax .or. qhi_j < qlo_i-pimax) then
+                              if(diag_enabled/=0) npi_supp = npi_supp + 1_8
+                              j = ll(j)
+                              cycle
+                           endif
+                           ang2 = ((xi-x(j))**2 + (yi-y(j))**2 + (zi-z(j))**2)
+                           if(ang2>0.0d0) then
+                              rp2_min = ang2*qlo_i*qlo_j
+                              rp2_max = ang2*qhi_i*qhi_j
+                              if(rp2_max>=rpmin2 .and. rp2_min<=rpmax2) then
+                                 if(diag_enabled/=0) nprod = nprod + int(nq,8)*int(nq,8)
+                                 do qa=1,nq
+                                    chi_i = qchi(qa,ilib)
+                                    do qb=1,nq
+                                       chi_j = qchi(qb,jlib)
+                                       qpi = abs(chi_i-chi_j)
+                                       if(qpi>=pimax) then
+                                          if(diag_enabled/=0) nqpi = nqpi + 1_8
+                                          cycle
+                                       endif
+                                       rp2 = chi_i*chi_j*ang2
+                                       if(rp2<=rpmin2 .or. rp2>rpmax2) then
+                                          if(diag_enabled/=0) nqrp = nqrp + 1_8
+                                          cycle
+                                       endif
+                                       ibin = 0
+                                       if(rp2>sepp2(nsepp)) then
+                                          ibin = nsepp
+                                       else
+                                          do ii=nsepp-1,1,-1
+                                             if(rp2>sepp2(ii)) then
+                                                ibin = ii
+                                                exit
+                                             endif
+                                          enddo
+                                       endif
+                                       if(ibin<=0) then
+                                          if(diag_enabled/=0) nqrp = nqrp + 1_8
+                                          cycle
+                                       endif
+                                       ! Projected pi bins are built as linear edges starting at 0.
+                                       ! Avoid an O(nsepv) scan inside the nq*nq loop.
+                                       ip = int(qpi/dsepv) + 1
+                                       if(ip>=1 .and. ip<=nsepv) then
+                                          aapv(ip,ibin) = aapv(ip,ibin) + wq
+                                          if(diag_enabled/=0) nacc = nacc + 1_8
+                                       else
+                                          if(diag_enabled/=0) nqpi = nqpi + 1_8
+                                       endif
+                                    enddo
+                                 enddo
+                              else
+                                 if(diag_enabled/=0) nrp_supp = nrp_supp + 1_8
+                              endif
+                           else
+                              if(diag_enabled/=0) nang_zero = nang_zero + 1_8
+                           endif
+                        else
+                           if(jq3>iq3) cycle lp_jq2
+                        endif
+                        j = ll(j)
+                     end do
+
+                  end do lp_jq2
+               end do lp_jq1
+            end do lp_jq3
+            i = ll(i)
+         end do
+      end do
+   end do
+end do
+!$omp end parallel do
+qdiag(1) = nscan
+qdiag(2) = nrv
+qdiag(3) = npi_supp
+qdiag(4) = nang_zero
+qdiag(5) = nrp_supp
+qdiag(6) = nprod
+qdiag(7) = nqpi
+qdiag(8) = nqrp
+qdiag(9) = nacc
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_A_qchi_wp
+
+
+
+subroutine rppi_A_qchi_wp_wg(nt,npt,dec,dc,dcang,wei,x,y,z,nq,nlib,qchi,qlo,qhi,idx, &
+           nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,wfib,diag_enabled, &
+           cntid,logf,progressf,sk,ll,aapv,qdiag)
+!===============================================================================
+! Weighted version of rppi_A_qchi_wp().  Uses the same support pruning and
+! diagnostics as the unweighted 16Quant kernel.  Input weights multiply each
+! accepted quantile-product contribution; wfib=1 also applies the standard
+! fiber-correction weight.
+implicit none
+integer       :: nt,nthr,npt,nsepp,nsepv,mxh1,mxh2,mxh3,nq,nlib,wfib,diag_enabled
+real(kind=8)  :: dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=4)  :: wei(npt)
+real(kind=8)  :: qchi(nq,nlib),qlo(nlib),qhi(nlib),sepp(nsepp+1),sepv(nsepv+1)
+integer       :: idx(npt)
+real(kind=8)  :: sbound(6),aapv(nsepv,nsepp)
+integer(kind=8) :: qdiag(9)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3,rp2
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,yi,zi,dc_i,ang2,shth2
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rpmin2,rvmax,rv,rvsearch,pimax,dsepv
+real(kind=8)  :: qlo_i,qhi_i,qlo_j,qhi_j,rp2_min,rp2_max,chi_i,chi_j,qpi,wq,wpair,wi
+integer       :: sk(mxh3,mxh2,mxh1),ll(npt),nc1,nc2,nc3
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq1min,jq2min,jq2max,jq2t,jq1m,jq2m
+integer       :: ilib,jlib,qa,qb,ip,ibin
+integer(kind=8) :: nscan,nrv,npi_supp,nang_zero,nrp_supp,nprod,nqpi,nqrp,nacc
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+aapv   = 0.0d0
+qdiag  = 0_8
+nscan = 0_8 ; nrv = 0_8 ; npi_supp = 0_8 ; nang_zero = 0_8
+nrp_supp = 0_8 ; nprod = 0_8 ; nqpi = 0_8 ; nqrp = 0_8 ; nacc = 0_8
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+rpmin2 = sepp2(1)
+rvmax  = rvsearch
+pimax  = sepv(nsepv+1)
+if(nsepv>0) then
+   dsepv = sepv(2)-sepv(1)
+else
+   dsepv = 1.0d0
+endif
+wq     = 1.0d0 / dble(nq*nq)
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:aapv,nscan,nrv,npi_supp,nang_zero,nrp_supp,nprod,nqpi,nqrp,nacc) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m,jq1min) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,yi,zi,dc_i,rv,ang2,ii,wi,shth2) &
+!$omp& private(ilib,jlib,qa,qb,ip,ibin,rp2,qpi,chi_i,chi_j,wpair) &
+!$omp& private(qlo_i,qhi_i,qlo_j,qhi_j,rp2_min,rp2_max) &
+!$omp& schedule(dynamic) if(nthr>1)
+do iq1=1,nc1
+   !$omp critical
+   call write_progress_stripe(cntid,iq1,mxh1,progressf)
+   write(11,*) cntid//' counting in DEC strip > ',iq1,'/',mxh1
+   flush(11)
+   !$omp end critical
+   do iq2=1,nc2
+      do iq3=1,nc3
+         i = sk(iq3,iq2,iq1)
+         do while(i/=0)
+            lp_jq3: do jq3=iq3,iq3+1
+               if(jq3>nc3) cycle lp_jq3
+               rcl    = (jq3-1)*hc3+dcoml
+               stm2   = sthmax2(rpmax,dcang(i),rcl)
+               dltdec = 2.0d0*asin(stm2)*rad2deg
+               jq1m   = int(dltdec/hc1)+1
+               if(jq3==iq3) then
+                  jq1min = iq1
+               else
+                  jq1min = iq1-jq1m
+               end if
+               lp_jq1: do jq1=jq1min,iq1+jq1m
+                  if(jq1>nc1.or.jq1<1) cycle lp_jq1
+                  if(jq1==iq1) then
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+                  else
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+                  end if
+                  jq2m   = int(dltra/hc2)+1
+                  jq2max = iq2+jq2m
+                  jq2min = iq2-jq2m
+                  if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+                  lp_jq2: do jq2=jq2min,jq2max
+                     if(jq2>nc2) then
+                        jq2t = jq2-nc2
+                     else if(jq2<1) then
+                        jq2t = jq2+nc2
+                     else
+                        jq2t = jq2
+                     end if
+                     if(jq3==iq3.and.jq2t<iq2.and.jq1==iq1) cycle lp_jq2
+                     if(jq3==iq3.and.jq2t==iq2.and.jq1==iq1) then
+                        j = ll(i)
+                     else
+                        j = sk(jq3,jq2t,jq1)
+                     endif
+                     xi  = x(i)
+                     yi  = y(i)
+                     zi  = z(i)
+                     dc_i = dc(i)
+                     wi = dble(wei(i))
+                     ilib = idx(i)
+                     qlo_i = qlo(ilib)
+                     qhi_i = qhi(ilib)
+
+                     do while(j/=0)
+                        if(diag_enabled/=0) nscan = nscan + 1_8
+                        rv = abs(dc_i-dc(j))
+                        if(rv<=rvmax) then
+                           if(diag_enabled/=0) nrv = nrv + 1_8
+                           jlib = idx(j)
+                           qlo_j = qlo(jlib)
+                           qhi_j = qhi(jlib)
+                           if(qhi_i < qlo_j-pimax .or. qhi_j < qlo_i-pimax) then
+                              if(diag_enabled/=0) npi_supp = npi_supp + 1_8
+                              j = ll(j)
+                              cycle
+                           endif
+                           ang2 = ((xi-x(j))**2 + (yi-y(j))**2 + (zi-z(j))**2)
+                           if(ang2>0.0d0) then
+                              rp2_min = ang2*qlo_i*qlo_j
+                              rp2_max = ang2*qhi_i*qhi_j
+                              if(rp2_max>=rpmin2 .and. rp2_min<=rpmax2) then
+                                 if(diag_enabled/=0) nprod = nprod + int(nq,8)*int(nq,8)
+                                 do qa=1,nq
+                                    chi_i = qchi(qa,ilib)
+                                    do qb=1,nq
+                                       chi_j = qchi(qb,jlib)
+                                       qpi = abs(chi_i-chi_j)
+                                       if(qpi>=pimax) then
+                                          if(diag_enabled/=0) nqpi = nqpi + 1_8
+                                          cycle
+                                       endif
+                                       rp2 = chi_i*chi_j*ang2
+                                       if(rp2<=rpmin2 .or. rp2>rpmax2) then
+                                          if(diag_enabled/=0) nqrp = nqrp + 1_8
+                                          cycle
+                                       endif
+                                       ibin = 0
+                                       if(rp2>sepp2(nsepp)) then
+                                          ibin = nsepp
+                                       else
+                                          do ii=nsepp-1,1,-1
+                                             if(rp2>sepp2(ii)) then
+                                                ibin = ii
+                                                exit
+                                             endif
+                                          enddo
+                                       endif
+                                       if(ibin<=0) then
+                                          if(diag_enabled/=0) nqrp = nqrp + 1_8
+                                          cycle
+                                       endif
+                                       ip = int(qpi/dsepv) + 1
+                                       if(ip>=1 .and. ip<=nsepv) then
+                                          wpair = wq*wi*dble(wei(j))
+                                          if(wfib==1) then
+                                             shth2 = rp2/(4.0d0*chi_i*chi_j)
+                                             wpair = wpair*wfiber(shth2)
+                                          endif
+                                          aapv(ip,ibin) = aapv(ip,ibin) + wpair
+                                          if(diag_enabled/=0) nacc = nacc + 1_8
+                                       else
+                                          if(diag_enabled/=0) nqpi = nqpi + 1_8
+                                       endif
+                                    enddo
+                                 enddo
+                              else
+                                 if(diag_enabled/=0) nrp_supp = nrp_supp + 1_8
+                              endif
+                           else
+                              if(diag_enabled/=0) nang_zero = nang_zero + 1_8
+                           endif
+                        else
+                           if(jq3>iq3) cycle lp_jq2
+                        endif
+                        j = ll(j)
+                     end do
+
+                  end do lp_jq2
+               end do lp_jq1
+            end do lp_jq3
+            i = ll(i)
+         end do
+      end do
+   end do
+end do
+!$omp end parallel do
+qdiag(1) = nscan
+qdiag(2) = nrv
+qdiag(3) = npi_supp
+qdiag(4) = nang_zero
+qdiag(5) = nrp_supp
+qdiag(6) = nprod
+qdiag(7) = nqpi
+qdiag(8) = nqrp
+qdiag(9) = nacc
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_A_qchi_wp_wg
+
+subroutine rppi_Ajk_qchi_wp(nt,npt,dec,dc,dcang,x,y,z,nq,nlib,qchi,qlo,qhi,idx,reg,nreg, &
+           nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3, &
+           cntid,logf,progressf,sk,ll,aapv,touch)
+!===============================================================================
+! NAME
+!  rppi_Ajk_qchi_wp()
+!
+! DESCRIPTION
+!  Jackknife-touch version of rppi_A_qchi_wp(). Accumulates full counts
+!  plus per-region touch counts so delete-one jackknife realizations can be
+!  formed in Python without rerunning the pair search.
+!
+implicit none
+integer       :: nt,nthr,npt,nsepp,nsepv,mxh1,mxh2,mxh3,nq,nlib,nreg
+real(kind=8)  :: dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: qchi(nq,nlib),qlo(nlib),qhi(nlib),sepp(nsepp+1),sepv(nsepv+1)
+integer       :: idx(npt),reg(npt)
+real(kind=8)  :: sbound(6),aapv(nsepv,nsepp),touch(nreg,nsepv,nsepp)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3,rp2
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,yi,zi,dc_i,ang2
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rpmin2,rvmax,rv,rvsearch,pimax,dsepv
+real(kind=8)  :: qlo_i,qhi_i,qlo_j,qhi_j,rp2_min,rp2_max,chi_i,chi_j,qpi,wq
+integer       :: sk(mxh3,mxh2,mxh1),ll(npt),nc1,nc2,nc3
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq1min,jq2min,jq2max,jq2t,jq1m,jq2m
+integer       :: ilib,jlib,qa,qb,ip,ibin,regi,regj
+integer(kind=8) :: nscan,nrv,npi_supp,nang_zero,nrp_supp,nprod,nqpi,nqrp,nacc
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+aapv   = 0.0d0
+touch  = 0.0d0
+nscan = 0_8 ; nrv = 0_8 ; npi_supp = 0_8 ; nang_zero = 0_8
+nrp_supp = 0_8 ; nprod = 0_8 ; nqpi = 0_8 ; nqrp = 0_8 ; nacc = 0_8
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+rpmin2 = sepp2(1)
+rvmax  = rvsearch
+pimax  = sepv(nsepv+1)
+if(nsepv>0) then
+   dsepv = sepv(2)-sepv(1)
+else
+   dsepv = 1.0d0
+endif
+wq     = 1.0d0 / dble(nq*nq)
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:aapv,nscan,nrv,npi_supp,nang_zero,nrp_supp,nprod,nqpi,nqrp,nacc) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m,jq1min) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,yi,zi,dc_i,rv,ang2,ii) &
+!$omp& private(ilib,jlib,qa,qb,ip,ibin,rp2,qpi,chi_i,chi_j,regi,regj) &
+!$omp& private(qlo_i,qhi_i,qlo_j,qhi_j,rp2_min,rp2_max) &
+!$omp& schedule(dynamic) if(nthr>1)
+do iq1=1,nc1
+   !$omp critical
+   call write_progress_stripe(cntid,iq1,mxh1,progressf)
+   write(11,*) cntid//' counting in DEC strip > ',iq1,'/',mxh1
+   flush(11)
+   !$omp end critical
+   do iq2=1,nc2
+      do iq3=1,nc3
+         i = sk(iq3,iq2,iq1)
+         do while(i/=0)
+            regi = reg(i) + 1
+            lp_jq3: do jq3=iq3,iq3+1
+               if(jq3>nc3) cycle lp_jq3
+               rcl    = (jq3-1)*hc3+dcoml
+               stm2   = sthmax2(rpmax,dcang(i),rcl)
+               dltdec = 2.0d0*asin(stm2)*rad2deg
+               jq1m   = int(dltdec/hc1)+1
+               if(jq3==iq3) then
+                  jq1min = iq1
+               else
+                  jq1min = iq1-jq1m
+               end if
+               lp_jq1: do jq1=jq1min,iq1+jq1m
+                  if(jq1>nc1.or.jq1<1) cycle lp_jq1
+                  if(jq1==iq1) then
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+                  else
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+                  end if
+                  jq2m   = int(dltra/hc2)+1
+                  jq2max = iq2+jq2m
+                  jq2min = iq2-jq2m
+                  if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+                  lp_jq2: do jq2=jq2min,jq2max
+                     if(jq2>nc2) then
+                        jq2t = jq2-nc2
+                     else if(jq2<1) then
+                        jq2t = jq2+nc2
+                     else
+                        jq2t = jq2
+                     end if
+                     if(jq3==iq3.and.jq2t<iq2.and.jq1==iq1) cycle lp_jq2
+                     if(jq3==iq3.and.jq2t==iq2.and.jq1==iq1) then
+                        j = ll(i)
+                     else
+                        j = sk(jq3,jq2t,jq1)
+                     endif
+                     xi  = x(i)
+                     yi  = y(i)
+                     zi  = z(i)
+                     dc_i = dc(i)
+                     ilib = idx(i)
+                     qlo_i = qlo(ilib)
+                     qhi_i = qhi(ilib)
+
+                     do while(j/=0)
+                        nscan = nscan + 1_8
+                        rv = abs(dc_i-dc(j))
+                        if(rv<=rvmax) then
+                           nrv = nrv + 1_8
+                           jlib = idx(j)
+                           regj = reg(j) + 1
+                           qlo_j = qlo(jlib)
+                           qhi_j = qhi(jlib)
+                           if(qhi_i < qlo_j-pimax .or. qhi_j < qlo_i-pimax) then
+                              npi_supp = npi_supp + 1_8
+                              j = ll(j)
+                              cycle
+                           endif
+                           ang2 = ((xi-x(j))**2 + (yi-y(j))**2 + (zi-z(j))**2)
+                           if(ang2>0.0d0) then
+                              rp2_min = ang2*qlo_i*qlo_j
+                              rp2_max = ang2*qhi_i*qhi_j
+                              if(rp2_max>=rpmin2 .and. rp2_min<=rpmax2) then
+                                 nprod = nprod + int(nq,8)*int(nq,8)
+                                 do qa=1,nq
+                                    chi_i = qchi(qa,ilib)
+                                    do qb=1,nq
+                                       chi_j = qchi(qb,jlib)
+                                       qpi = abs(chi_i-chi_j)
+                                       if(qpi>=pimax) then
+                                          nqpi = nqpi + 1_8
+                                          cycle
+                                       endif
+                                       rp2 = chi_i*chi_j*ang2
+                                       if(rp2<=rpmin2 .or. rp2>rpmax2) then
+                                          nqrp = nqrp + 1_8
+                                          cycle
+                                       endif
+                                       ibin = 0
+                                       if(rp2>sepp2(nsepp)) then
+                                          ibin = nsepp
+                                       else
+                                          do ii=nsepp-1,1,-1
+                                             if(rp2>sepp2(ii)) then
+                                                ibin = ii
+                                                exit
+                                             endif
+                                          enddo
+                                       endif
+                                       if(ibin<=0) then
+                                          nqrp = nqrp + 1_8
+                                          cycle
+                                       endif
+                                       ! Projected pi bins are built as linear edges starting at 0.
+                                       ! Avoid an O(nsepv) scan inside the nq*nq loop.
+                                       ip = int(qpi/dsepv) + 1
+                                       if(ip>=1 .and. ip<=nsepv) then
+                                          aapv(ip,ibin) = aapv(ip,ibin) + wq
+                                          touch(regi,ip,ibin) = touch(regi,ip,ibin) + wq
+                                          if(regj/=regi) then
+                                             touch(regj,ip,ibin) = touch(regj,ip,ibin) + wq
+                                          endif
+                                          nacc = nacc + 1_8
+                                       else
+                                          nqpi = nqpi + 1_8
+                                       endif
+                                    enddo
+                                 enddo
+                              else
+                                 nrp_supp = nrp_supp + 1_8
+                              endif
+                           else
+                              nang_zero = nang_zero + 1_8
+                           endif
+                        else
+                           if(jq3>iq3) cycle lp_jq2
+                        endif
+                        j = ll(j)
+                     end do
+
+                  end do lp_jq2
+               end do lp_jq1
+            end do lp_jq3
+            i = ll(i)
+         end do
+      end do
+   end do
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Ajk_qchi_wp
+
+subroutine rppi_Ab_qchi_wp(nt,npt,dec,dc,dcang,x,y,z,nq,nlib,qchi,qlo,qhi,idx, &
+           nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,nbts,bseed, &
+           cntid,logf,progressf,sk,ll,aapv,baapv)
+!===============================================================================
+! NAME
+!  rppi_Ab_qchi_wp()
+!
+! DESCRIPTION
+!  Bootstrap version of rppi_A_qchi_wp(). Counts the full quantile_chi
+!  DD histogram and bootstrap-resampled DD histograms in one pair-search pass.
+!
+implicit none
+integer       :: nt,nthr,npt,nsepp,nsepv,mxh1,mxh2,mxh3,nq,nlib,nbts,bseed
+real(kind=8)  :: dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: qchi(nq,nlib),qlo(nlib),qhi(nlib),sepp(nsepp+1),sepv(nsepv+1)
+integer       :: idx(npt)
+real(kind=8)  :: sbound(6),aapv(nsepv,nsepp),baapv(nbts,nsepp,nsepv)
+real(kind=4)  :: wbts(nbts,npt)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3,rp2
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,yi,zi,dc_i,ang2
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rpmin2,rvmax,rv,rvsearch,pimax,dsepv
+real(kind=8)  :: qlo_i,qhi_i,qlo_j,qhi_j,rp2_min,rp2_max,chi_i,chi_j,qpi,wq,wpair
+integer       :: sk(mxh3,mxh2,mxh1),ll(npt),nc1,nc2,nc3
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq1min,jq2min,jq2max,jq2t,jq1m,jq2m
+integer       :: ilib,jlib,qa,qb,ip,ibin
+integer(kind=8) :: nscan,nrv,npi_supp,nang_zero,nrp_supp,nprod,nqpi,nqrp,nacc
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+aapv   = 0.0d0
+baapv  = 0.0d0
+nscan = 0_8 ; nrv = 0_8 ; npi_supp = 0_8 ; nang_zero = 0_8
+nrp_supp = 0_8 ; nprod = 0_8 ; nqpi = 0_8 ; nqrp = 0_8 ; nacc = 0_8
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+rpmin2 = sepp2(1)
+rvmax  = rvsearch
+pimax  = sepv(nsepv+1)
+if(nsepv>0) then
+   dsepv = sepv(2)-sepv(1)
+else
+   dsepv = 1.0d0
+endif
+wq     = 1.0d0 / dble(nq*nq)
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+call bootstrap(npt,nbts,bseed,wbts)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:aapv,nscan,nrv,npi_supp,nang_zero,nrp_supp,nprod,nqpi,nqrp,nacc) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m,jq1min) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,yi,zi,dc_i,rv,ang2,ii) &
+!$omp& private(ilib,jlib,qa,qb,ip,ibin,rp2,qpi,chi_i,chi_j,wpair) &
+!$omp& private(qlo_i,qhi_i,qlo_j,qhi_j,rp2_min,rp2_max) &
+!$omp& schedule(dynamic) if(nthr>1)
+do iq1=1,nc1
+   !$omp critical
+   call write_progress_stripe(cntid,iq1,mxh1,progressf)
+   write(11,*) cntid//' counting in DEC strip > ',iq1,'/',mxh1
+   flush(11)
+   !$omp end critical
+   do iq2=1,nc2
+      do iq3=1,nc3
+         i = sk(iq3,iq2,iq1)
+         do while(i/=0)
+            lp_jq3: do jq3=iq3,iq3+1
+               if(jq3>nc3) cycle lp_jq3
+               rcl    = (jq3-1)*hc3+dcoml
+               stm2   = sthmax2(rpmax,dcang(i),rcl)
+               dltdec = 2.0d0*asin(stm2)*rad2deg
+               jq1m   = int(dltdec/hc1)+1
+               if(jq3==iq3) then
+                  jq1min = iq1
+               else
+                  jq1min = iq1-jq1m
+               end if
+               lp_jq1: do jq1=jq1min,iq1+jq1m
+                  if(jq1>nc1.or.jq1<1) cycle lp_jq1
+                  if(jq1==iq1) then
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+                  else
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+                  end if
+                  jq2m   = int(dltra/hc2)+1
+                  jq2max = iq2+jq2m
+                  jq2min = iq2-jq2m
+                  if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+                  lp_jq2: do jq2=jq2min,jq2max
+                     if(jq2>nc2) then
+                        jq2t = jq2-nc2
+                     else if(jq2<1) then
+                        jq2t = jq2+nc2
+                     else
+                        jq2t = jq2
+                     end if
+                     if(jq3==iq3.and.jq2t<iq2.and.jq1==iq1) cycle lp_jq2
+                     if(jq3==iq3.and.jq2t==iq2.and.jq1==iq1) then
+                        j = ll(i)
+                     else
+                        j = sk(jq3,jq2t,jq1)
+                     endif
+                     xi  = x(i)
+                     yi  = y(i)
+                     zi  = z(i)
+                     dc_i = dc(i)
+                     ilib = idx(i)
+                     qlo_i = qlo(ilib)
+                     qhi_i = qhi(ilib)
+
+                     do while(j/=0)
+                        nscan = nscan + 1_8
+                        rv = abs(dc_i-dc(j))
+                        if(rv<=rvmax) then
+                           nrv = nrv + 1_8
+                           jlib = idx(j)
+                           qlo_j = qlo(jlib)
+                           qhi_j = qhi(jlib)
+                           if(qhi_i < qlo_j-pimax .or. qhi_j < qlo_i-pimax) then
+                              npi_supp = npi_supp + 1_8
+                              j = ll(j)
+                              cycle
+                           endif
+                           ang2 = ((xi-x(j))**2 + (yi-y(j))**2 + (zi-z(j))**2)
+                           if(ang2>0.0d0) then
+                              rp2_min = ang2*qlo_i*qlo_j
+                              rp2_max = ang2*qhi_i*qhi_j
+                              if(rp2_max>=rpmin2 .and. rp2_min<=rpmax2) then
+                                 nprod = nprod + int(nq,8)*int(nq,8)
+                                 do qa=1,nq
+                                    chi_i = qchi(qa,ilib)
+                                    do qb=1,nq
+                                       chi_j = qchi(qb,jlib)
+                                       qpi = abs(chi_i-chi_j)
+                                       if(qpi>=pimax) then
+                                          nqpi = nqpi + 1_8
+                                          cycle
+                                       endif
+                                       rp2 = chi_i*chi_j*ang2
+                                       if(rp2<=rpmin2 .or. rp2>rpmax2) then
+                                          nqrp = nqrp + 1_8
+                                          cycle
+                                       endif
+                                       ibin = 0
+                                       if(rp2>sepp2(nsepp)) then
+                                          ibin = nsepp
+                                       else
+                                          do ii=nsepp-1,1,-1
+                                             if(rp2>sepp2(ii)) then
+                                                ibin = ii
+                                                exit
+                                             endif
+                                          enddo
+                                       endif
+                                       if(ibin<=0) then
+                                          nqrp = nqrp + 1_8
+                                          cycle
+                                       endif
+                                       ! Projected pi bins are built as linear edges starting at 0.
+                                       ! Avoid an O(nsepv) scan inside the nq*nq loop.
+                                       ip = int(qpi/dsepv) + 1
+                                       if(ip>=1 .and. ip<=nsepv) then
+                                          wpair = wq
+                                          aapv(ip,ibin) = aapv(ip,ibin) + wpair
+                                          baapv(:,ibin,ip) = baapv(:,ibin,ip) + wpair*wbts(:,i)*wbts(:,j)
+                                          nacc = nacc + 1_8
+                                       else
+                                          nqpi = nqpi + 1_8
+                                       endif
+                                    enddo
+                                 enddo
+                              else
+                                 nrp_supp = nrp_supp + 1_8
+                              endif
+                           else
+                              nang_zero = nang_zero + 1_8
+                           endif
+                        else
+                           if(jq3>iq3) cycle lp_jq2
+                        endif
+                        j = ll(j)
+                     end do
+
+                  end do lp_jq2
+               end do lp_jq1
+            end do lp_jq3
+            i = ll(i)
+         end do
+      end do
+   end do
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Ab_qchi_wp
+
+
+subroutine rppi_A_gmm_wp_wg(nt,npt,dec,dc,dcang,wei,x,y,z,kpdf,nlib,alpha,mu,sig,idx, &
+           nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,wfib, &
+           cntid,logf,progressf,sk,ll,aapv)
+!===============================================================================
+! Weighted version of rppi_A_gmm_wp() with optional fiber corrections.
+!
+implicit none
+integer       :: nt,nthr,npt,nsepp,nsepv,mxh1,mxh2,mxh3,kpdf,nlib,wfib
+real(kind=8)  :: dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=4)  :: wei(npt)
+real(kind=8)  :: alpha(kpdf,nlib),mu(kpdf,nlib),sig(kpdf,nlib),sepp(nsepp+1),sepv(nsepv+1)
+integer       :: idx(npt)
+real(kind=8)  :: sbound(6),aapv(nsepv,nsepp)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3,rp2
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,yi,zi,dc_i,ang2
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rvmax,rv,rvsearch,probfloor
+real(kind=8)  :: muD,sigD,ppi,wcomp,wpp,shth2
+integer       :: sk(mxh3,mxh2,mxh1),ll(npt),nc1,nc2,nc3
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq1min,jq2min,jq2max,jq2t,jq1m,jq2m
+integer       :: ilib,jlib,kk,llc,ip,ibin
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+aapv   = 0.0d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+	! Guard against nc3==0 when rvmax exceeds the distance span.
+	if(rvmax<=0.0d0) rvmax = 1.0d-9
+	nc3 = int((dcomu-dcoml)/rvmax)
+	if(nc3<1) nc3 = 1
+	if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:aapv) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m,jq1min) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,yi,zi,dc_i,rv,ang2,ii,wpp,shth2) &
+!$omp& private(ilib,jlib,kk,llc,ip,ibin,muD,sigD,ppi,wcomp,rp2) &
+!$omp& schedule(dynamic) if(nthr>1)
+do iq1=1,nc1
+   !$omp critical
+   call write_progress_stripe(cntid,iq1,mxh1,progressf)
+   write(11,*) cntid//' counting in DEC strip > ',iq1,'/',mxh1
+   flush(11)
+   !$omp end critical
+   do iq2=1,nc2
+      do iq3=1,nc3
+         i = sk(iq3,iq2,iq1)
+         do while(i/=0)
+            lp_jq3: do jq3=iq3,iq3+1
+               if(jq3>nc3) cycle lp_jq3
+               rcl    = (jq3-1)*hc3+dcoml
+               stm2   = sthmax2(rpmax,dcang(i),rcl)
+               dltdec = 2.0d0*asin(stm2)*rad2deg
+               jq1m   = int(dltdec/hc1)+1
+               if(jq3==iq3) then
+                  jq1min = iq1
+               else
+                  jq1min = iq1-jq1m
+               end if
+               lp_jq1: do jq1=jq1min,iq1+jq1m
+                  if(jq1>nc1.or.jq1<1) cycle lp_jq1
+                  if(jq1==iq1) then
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+                  else
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+                  end if
+                  jq2m   = int(dltra/hc2)+1
+                  jq2max = iq2+jq2m
+                  jq2min = iq2-jq2m
+                  if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+                  lp_jq2: do jq2=jq2min,jq2max
+                     if(jq2>nc2) then
+                        jq2t = jq2-nc2
+                     else if(jq2<1) then
+                        jq2t = jq2+nc2
+                     else
+                        jq2t = jq2
+                     end if
+                     if(jq3==iq3.and.jq2t<iq2.and.jq1==iq1) cycle lp_jq2
+                     if(jq3==iq3.and.jq2t==iq2.and.jq1==iq1) then
+                        j = ll(i)
+                     else
+                        j = sk(jq3,jq2t,jq1)
+                     endif
+                     xi  = x(i)
+                     yi  = y(i)
+                     zi  = z(i)
+                     dc_i = dc(i)
+                     ilib = idx(i)
+
+                     do while(j/=0)
+                        rv = abs(dc_i-dc(j))
+                        if(rv<=rvmax) then
+                           ang2 = ((xi-x(j))**2 + (yi-y(j))**2 + (zi-z(j))**2)
+                           if(ang2>0.0d0) then
+                              jlib = idx(j)
+                              wpp = wei(i)*wei(j)
+                              if(wfib==1) then
+                                 shth2 = ang2/4.0d0
+                                 wpp = wpp*wfiber(shth2)
+                              endif
+                              do kk=1,kpdf
+                                 do llc=1,kpdf
+                                    wcomp = alpha(kk,ilib)*alpha(llc,jlib)
+                                    if(wcomp<=probfloor) cycle
+                                    rp2 = mu(kk,ilib)*mu(llc,jlib)*ang2
+                                    if(rp2>rpmax2) cycle
+
+                                    muD = mu(kk,ilib) - mu(llc,jlib)
+                                    sigD = sqrt(sig(kk,ilib)*sig(kk,ilib) + sig(llc,jlib)*sig(llc,jlib))
+
+                                    ibin = 0
+                                    if(rp2>sepp2(nsepp)) then
+                                       ibin = nsepp
+                                    else
+                                       do ii=nsepp-1,1,-1
+                                          if(rp2>sepp2(ii)) then
+                                             ibin = ii
+                                             exit
+                                          endif
+                                       enddo
+                                    endif
+                                    if(ibin<=0) cycle
+
+                                    do ip=1,nsepv
+                                       ppi = gmm_abs_shell_prob(muD, sigD, sepv(ip), sepv(ip+1))
+                                       if ((nsepv == 1 .and. ppi > probfloor) .or. &
+                                           (nsepv > 1 .and. ppi > 0.0d0)) then
+                                          aapv(ip,ibin) = aapv(ip,ibin) + wpp*wcomp*ppi
+                                       endif
+                                    enddo
+                                 enddo
+                              enddo
+                           endif
+                        else
+                           if(jq3>iq3) cycle lp_jq2
+                        endif
+                        j = ll(j)
+                     end do
+
+                  end do lp_jq2
+               end do lp_jq1
+            end do lp_jq3
+            i = ll(i)
+         end do
+      end do
+   end do
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_A_gmm_wp_wg
+
+
+
+subroutine rppi_A_grid_wp(nt,npt,dec,dc,dcang,x,y,z,ngrid,nlib,grid,prob,cdf,lo,hi,idx, &
+           nact,act_idx,act_start,act_count,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3, &
+           cntid,logf,progressf,sk,ll,aapv)
+!===============================================================================
+! Exact common-grid PDF version of rppi_A_gmm_wp().
+! Uses the same SK/LL search and OpenMP loop structure, but the pair weight is
+! integrated directly on the shared empirical PDF grid using per-object CDFs.
+implicit none
+integer       :: nt,nthr,npt,nsepp,nsepv,mxh1,mxh2,mxh3,ngrid,nlib,nact
+real(kind=8)  :: dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: grid(ngrid),prob(ngrid,nlib),cdf(ngrid,nlib),sepp(nsepp+1),sepv(nsepv+1)
+integer       :: lo(nlib),hi(nlib),idx(npt),act_idx(nact),act_start(nlib),act_count(nlib)
+real(kind=8)  :: sbound(6),aapv(nsepv,nsepp)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,yi,zi,dc_i,ang2
+real(kind=8)  :: sepp2(nsepp+1),rpmin2,rpmax,rpmax2,rvmax,rv,rvsearch,pimax
+real(kind=8)  :: chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair
+integer       :: sk(mxh3,mxh2,mxh1),ll(npt),nc1,nc2,nc3
+integer       :: i,j,ii,iq1,iq2,iq3,jq1,jq2,jq3,jq1min,jq2min,jq2max,jq2t,jq1m,jq2m
+integer       :: ilib,jlib
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+aapv   = 0.0d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmin2 = sepp2(1)
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(nsepv+1)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:aapv) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m,jq1min) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,yi,zi,dc_i,rv,ang2,ii) &
+!$omp& private(ilib,jlib,chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair) &
+!$omp& schedule(dynamic) if(nthr>1)
+do iq1=1,nc1
+   !$omp critical
+   call write_progress_stripe(cntid,iq1,mxh1,progressf)
+   write(11,*) cntid//' counting in DEC strip > ',iq1,'/',mxh1
+   flush(11)
+   !$omp end critical
+   do iq2=1,nc2
+      do iq3=1,nc3
+         i = sk(iq3,iq2,iq1)
+         do while(i/=0)
+            lp_jq3: do jq3=iq3,iq3+1
+               if(jq3>nc3) cycle lp_jq3
+               rcl    = (jq3-1)*hc3+dcoml
+               stm2   = sthmax2(rpmax,dcang(i),rcl)
+               dltdec = 2.0d0*asin(stm2)*rad2deg
+               jq1m   = int(dltdec/hc1)+1
+               if(jq3==iq3) then
+                  jq1min = iq1
+               else
+                  jq1min = iq1-jq1m
+               end if
+               lp_jq1: do jq1=jq1min,iq1+jq1m
+                  if(jq1>nc1.or.jq1<1) cycle lp_jq1
+                  if(jq1==iq1) then
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+                  else
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+                  end if
+                  jq2m   = int(dltra/hc2)+1
+                  jq2max = iq2+jq2m
+                  jq2min = iq2-jq2m
+                  if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+                  lp_jq2: do jq2=jq2min,jq2max
+                     if(jq2>nc2) then
+                        jq2t = jq2-nc2
+                     else if(jq2<1) then
+                        jq2t = jq2+nc2
+                     else
+                        jq2t = jq2
+                     end if
+                     if(jq3==iq3.and.jq2t<iq2.and.jq1==iq1) cycle lp_jq2
+                     if(jq3==iq3.and.jq2t==iq2.and.jq1==iq1) then
+                        j = ll(i)
+                     else
+                        j = sk(jq3,jq2t,jq1)
+                     endif
+                     xi  = x(i)
+                     yi  = y(i)
+                     zi  = z(i)
+                     dc_i = dc(i)
+                     ilib = idx(i)
+                     chi_lo_i = grid(lo(ilib))
+                     chi_hi_i = grid(hi(ilib))
+
+                     do while(j/=0)
+                        rv = abs(dc_i-dc(j))
+                        if(rv<=rvmax) then
+                           jlib = idx(j)
+                           chi_lo_j = grid(lo(jlib))
+                           chi_hi_j = grid(hi(jlib))
+                           if(chi_hi_i < chi_lo_j - pimax .or. chi_hi_j < chi_lo_i - pimax) then
+                              j = ll(j)
+                              cycle
+                           endif
+                           ang2 = ((xi-x(j))**2 + (yi-y(j))**2 + (zi-z(j))**2)
+                           if(ang2>0.0d0) then
+                              rp2min_pair = ang2 * (chi_lo_i * chi_lo_j)
+                              rp2max_pair = ang2 * (chi_hi_i * chi_hi_j)
+                              if(rp2min_pair<=rpmax2 .and. rp2max_pair>=rpmin2) then
+                                 call accum_exact_grid_pair_sparse(nsepp,sepp2,nsepv,sepv,ang2,grid,prob(:,ilib),cdf(:,jlib), &
+                                      act_idx,act_start(ilib),act_count(ilib),lo(jlib),hi(jlib),1.0d0,aapv)
+                              endif
+                           endif
+                        else
+                           if(jq3>iq3) cycle lp_jq2
+                        endif
+                        j = ll(j)
+                     end do
+
+                  end do lp_jq2
+               end do lp_jq1
+            end do lp_jq3
+            i = ll(i)
+         end do
+      end do
+   end do
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_A_grid_wp
+
+
+subroutine rppi_A_grid_wp_wg(nt,npt,dec,dc,dcang,wei,x,y,z,ngrid,nlib,grid,prob,cdf,lo,hi,idx, &
+           nact,act_idx,act_start,act_count,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,wfib, &
+           cntid,logf,progressf,sk,ll,aapv)
+!===============================================================================
+! Weighted exact common-grid PDF version of rppi_A_grid_wp().
+implicit none
+integer       :: nt,nthr,npt,nsepp,nsepv,mxh1,mxh2,mxh3,ngrid,nlib,nact,wfib
+real(kind=8)  :: dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=4)  :: wei(npt)
+real(kind=8)  :: grid(ngrid),prob(ngrid,nlib),cdf(ngrid,nlib),sepp(nsepp+1),sepv(nsepv+1)
+integer       :: lo(nlib),hi(nlib),idx(npt),act_idx(nact),act_start(nlib),act_count(nlib)
+real(kind=8)  :: sbound(6),aapv(nsepv,nsepp)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,yi,zi,dc_i,ang2
+real(kind=8)  :: sepp2(nsepp+1),rpmin2,rpmax,rpmax2,rvmax,rv,rvsearch,pimax
+real(kind=8)  :: chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair,wpair,shth2
+integer       :: sk(mxh3,mxh2,mxh1),ll(npt),nc1,nc2,nc3
+integer       :: i,j,ii,iq1,iq2,iq3,jq1,jq2,jq3,jq1min,jq2min,jq2max,jq2t,jq1m,jq2m
+integer       :: ilib,jlib
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+aapv   = 0.0d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmin2 = sepp2(1)
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(nsepv+1)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:aapv) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m,jq1min) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,yi,zi,dc_i,rv,ang2,ii,wpair,shth2) &
+!$omp& private(ilib,jlib,chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair) &
+!$omp& schedule(dynamic) if(nthr>1)
+do iq1=1,nc1
+   !$omp critical
+   call write_progress_stripe(cntid,iq1,mxh1,progressf)
+   write(11,*) cntid//' counting in DEC strip > ',iq1,'/',mxh1
+   flush(11)
+   !$omp end critical
+   do iq2=1,nc2
+      do iq3=1,nc3
+         i = sk(iq3,iq2,iq1)
+         do while(i/=0)
+            lp_jq3: do jq3=iq3,iq3+1
+               if(jq3>nc3) cycle lp_jq3
+               rcl    = (jq3-1)*hc3+dcoml
+               stm2   = sthmax2(rpmax,dcang(i),rcl)
+               dltdec = 2.0d0*asin(stm2)*rad2deg
+               jq1m   = int(dltdec/hc1)+1
+               if(jq3==iq3) then
+                  jq1min = iq1
+               else
+                  jq1min = iq1-jq1m
+               end if
+               lp_jq1: do jq1=jq1min,iq1+jq1m
+                  if(jq1>nc1.or.jq1<1) cycle lp_jq1
+                  if(jq1==iq1) then
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+                  else
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+                  end if
+                  jq2m   = int(dltra/hc2)+1
+                  jq2max = iq2+jq2m
+                  jq2min = iq2-jq2m
+                  if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+                  lp_jq2: do jq2=jq2min,jq2max
+                     if(jq2>nc2) then
+                        jq2t = jq2-nc2
+                     else if(jq2<1) then
+                        jq2t = jq2+nc2
+                     else
+                        jq2t = jq2
+                     end if
+                     if(jq3==iq3.and.jq2t<iq2.and.jq1==iq1) cycle lp_jq2
+                     if(jq3==iq3.and.jq2t==iq2.and.jq1==iq1) then
+                        j = ll(i)
+                     else
+                        j = sk(jq3,jq2t,jq1)
+                     endif
+                     xi  = x(i)
+                     yi  = y(i)
+                     zi  = z(i)
+                     dc_i = dc(i)
+                     ilib = idx(i)
+                     chi_lo_i = grid(lo(ilib))
+                     chi_hi_i = grid(hi(ilib))
+
+                     do while(j/=0)
+                        rv = abs(dc_i-dc(j))
+                        if(rv<=rvmax) then
+                           jlib = idx(j)
+                           chi_lo_j = grid(lo(jlib))
+                           chi_hi_j = grid(hi(jlib))
+                           if(chi_hi_i < chi_lo_j - pimax .or. chi_hi_j < chi_lo_i - pimax) then
+                              j = ll(j)
+                              cycle
+                           endif
+                           ang2 = ((xi-x(j))**2 + (yi-y(j))**2 + (zi-z(j))**2)
+                           if(ang2>0.0d0) then
+                              rp2min_pair = ang2 * (chi_lo_i * chi_lo_j)
+                              rp2max_pair = ang2 * (chi_hi_i * chi_hi_j)
+                              if(rp2min_pair<=rpmax2 .and. rp2max_pair>=rpmin2) then
+                                 wpair = wei(i)*wei(j)
+                                 if(wfib==1) then
+                                    shth2 = ang2/4.0d0
+                                    wpair = wpair*wfiber(shth2)
+                                 endif
+                                 call accum_exact_grid_pair_sparse(nsepp,sepp2,nsepv,sepv,ang2,grid,prob(:,ilib),cdf(:,jlib), &
+                                      act_idx,act_start(ilib),act_count(ilib),lo(jlib),hi(jlib),wpair,aapv)
+                              endif
+                           endif
+                        else
+                           if(jq3>iq3) cycle lp_jq2
+                        endif
+                        j = ll(j)
+                     end do
+
+                  end do lp_jq2
+               end do lp_jq1
+            end do lp_jq3
+            i = ll(i)
+         end do
+      end do
+   end do
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_A_grid_wp_wg
+
+
+subroutine rppi_Ab_grid_wp(nt,npt,dec,dc,dcang,x,y,z,ngrid,nlib,grid,prob,cdf,lo,hi,idx, &
+           nact,act_idx,act_start,act_count,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3, &
+           nbts,bseed,cntid,logf,progressf,sk,ll,aapv,baapv)
+!===============================================================================
+! Bootstrap exact common-grid PDF version of rppi_A_grid_wp().
+implicit none
+integer       :: nt,nthr,npt,nsepp,nsepv,mxh1,mxh2,mxh3,ngrid,nlib,nact,nbts,bseed
+real(kind=8)  :: dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: grid(ngrid),prob(ngrid,nlib),cdf(ngrid,nlib),sepp(nsepp+1),sepv(nsepv+1)
+integer       :: lo(nlib),hi(nlib),idx(npt),act_idx(nact),act_start(nlib),act_count(nlib)
+real(kind=8)  :: sbound(6),aapv(nsepv,nsepp),baapv(nbts,nsepp,nsepv)
+real(kind=4)  :: wbts(nbts,npt)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,yi,zi,dc_i,ang2
+real(kind=8)  :: sepp2(nsepp+1),rpmin2,rpmax,rpmax2,rvmax,rv,rvsearch,pimax
+real(kind=8)  :: chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair
+integer       :: sk(mxh3,mxh2,mxh1),ll(npt),nc1,nc2,nc3
+integer       :: i,j,iq1,iq2,iq3,jq1,jq2,jq3,jq1min,jq2min,jq2max,jq2t,jq1m,jq2m
+integer       :: ilib,jlib
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+aapv   = 0.0d0
+baapv  = 0.0d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmin2 = sepp2(1)
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(nsepv+1)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+call bootstrap(npt,nbts,bseed,wbts)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:aapv,baapv) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m,jq1min) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,yi,zi,dc_i,rv,ang2) &
+!$omp& private(ilib,jlib,chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair) &
+!$omp& schedule(dynamic) if(nthr>1)
+do iq1=1,nc1
+   !$omp critical
+   call write_progress_stripe(cntid,iq1,mxh1,progressf)
+   write(11,*) cntid//' counting in DEC strip > ',iq1,'/',mxh1
+   flush(11)
+   !$omp end critical
+   do iq2=1,nc2
+      do iq3=1,nc3
+         i = sk(iq3,iq2,iq1)
+         do while(i/=0)
+            lp_jq3: do jq3=iq3,iq3+1
+               if(jq3>nc3) cycle lp_jq3
+               rcl    = (jq3-1)*hc3+dcoml
+               stm2   = sthmax2(rpmax,dcang(i),rcl)
+               dltdec = 2.0d0*asin(stm2)*rad2deg
+               jq1m   = int(dltdec/hc1)+1
+               if(jq3==iq3) then
+                  jq1min = iq1
+               else
+                  jq1min = iq1-jq1m
+               end if
+               lp_jq1: do jq1=jq1min,iq1+jq1m
+                  if(jq1>nc1.or.jq1<1) cycle lp_jq1
+                  if(jq1==iq1) then
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+                  else
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+                  end if
+                  jq2m   = int(dltra/hc2)+1
+                  jq2max = iq2+jq2m
+                  jq2min = iq2-jq2m
+                  if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+                  lp_jq2: do jq2=jq2min,jq2max
+                     if(jq2>nc2) then
+                        jq2t = jq2-nc2
+                     else if(jq2<1) then
+                        jq2t = jq2+nc2
+                     else
+                        jq2t = jq2
+                     end if
+                     if(jq3==iq3.and.jq2t<iq2.and.jq1==iq1) cycle lp_jq2
+                     if(jq3==iq3.and.jq2t==iq2.and.jq1==iq1) then
+                        j = ll(i)
+                     else
+                        j = sk(jq3,jq2t,jq1)
+                     endif
+                     xi  = x(i)
+                     yi  = y(i)
+                     zi  = z(i)
+                     dc_i = dc(i)
+                     ilib = idx(i)
+                     chi_lo_i = grid(lo(ilib))
+                     chi_hi_i = grid(hi(ilib))
+
+                     do while(j/=0)
+                        rv = abs(dc_i-dc(j))
+                        if(rv<=rvmax) then
+                           jlib = idx(j)
+                           chi_lo_j = grid(lo(jlib))
+                           chi_hi_j = grid(hi(jlib))
+                           if(chi_hi_i < chi_lo_j - pimax .or. chi_hi_j < chi_lo_i - pimax) then
+                              j = ll(j)
+                              cycle
+                           endif
+                           ang2 = ((xi-x(j))**2 + (yi-y(j))**2 + (zi-z(j))**2)
+                           if(ang2>0.0d0) then
+                              rp2min_pair = ang2 * (chi_lo_i * chi_lo_j)
+                              rp2max_pair = ang2 * (chi_hi_i * chi_hi_j)
+                              if(rp2min_pair<=rpmax2 .and. rp2max_pair>=rpmin2) then
+                                 call accum_exact_grid_pair_sparse_boot(nsepp,sepp2,nsepv,sepv,ang2,grid, &
+                                      prob(:,ilib),cdf(:,jlib),act_idx,act_start(ilib),act_count(ilib), &
+                                      lo(jlib),hi(jlib),1.0d0,nbts,wbts(:,i),wbts(:,j),aapv,baapv)
+                              endif
+                           endif
+                        else
+                           if(jq3>iq3) cycle lp_jq2
+                        endif
+                        j = ll(j)
+                     end do
+
+                  end do lp_jq2
+               end do lp_jq1
+            end do lp_jq3
+            i = ll(i)
+         end do
+      end do
+   end do
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Ab_grid_wp
+
+
+subroutine rppi_Ab_grid_wp_wg(nt,npt,dec,dc,dcang,wei,x,y,z,ngrid,nlib,grid,prob,cdf,lo,hi,idx, &
+           nact,act_idx,act_start,act_count,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3, &
+           nbts,bseed,wfib,cntid,logf,progressf,sk,ll,aapv,baapv,normb,sumwb)
+!===============================================================================
+! Weighted bootstrap exact common-grid PDF version of rppi_A_grid_wp().
+implicit none
+integer       :: nt,nthr,npt,nsepp,nsepv,mxh1,mxh2,mxh3,ngrid,nlib,nact,nbts,bseed,wfib
+real(kind=8)  :: dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=4)  :: wei(npt)
+real(kind=8)  :: grid(ngrid),prob(ngrid,nlib),cdf(ngrid,nlib),sepp(nsepp+1),sepv(nsepv+1)
+integer       :: lo(nlib),hi(nlib),idx(npt),act_idx(nact),act_start(nlib),act_count(nlib)
+real(kind=8)  :: sbound(6),aapv(nsepv,nsepp),baapv(nbts,nsepp,nsepv),normb(nbts),sumwb(nbts)
+real(kind=4)  :: wbts(nbts,npt)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,yi,zi,dc_i,ang2,wpair,shth2
+real(kind=8)  :: sepp2(nsepp+1),rpmin2,rpmax,rpmax2,rvmax,rv,rvsearch,pimax
+real(kind=8)  :: chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair
+integer       :: sk(mxh3,mxh2,mxh1),ll(npt),nc1,nc2,nc3
+integer       :: i,j,iq1,iq2,iq3,jq1,jq2,jq3,jq1min,jq2min,jq2max,jq2t,jq1m,jq2m
+integer       :: ilib,jlib
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+aapv   = 0.0d0
+baapv  = 0.0d0
+normb  = 0.0d0
+sumwb  = 0.0d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmin2 = sepp2(1)
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(nsepv+1)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+call bootstrap(npt,nbts,bseed,wbts)
+call bootstrap_weight_stats(npt,nbts,wei,wbts,sumwb,normb)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:aapv,baapv) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m,jq1min) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,yi,zi,dc_i,rv,ang2,wpair,shth2) &
+!$omp& private(ilib,jlib,chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair) &
+!$omp& schedule(dynamic) if(nthr>1)
+do iq1=1,nc1
+   !$omp critical
+   call write_progress_stripe(cntid,iq1,mxh1,progressf)
+   write(11,*) cntid//' counting in DEC strip > ',iq1,'/',mxh1
+   flush(11)
+   !$omp end critical
+   do iq2=1,nc2
+      do iq3=1,nc3
+         i = sk(iq3,iq2,iq1)
+         do while(i/=0)
+            lp_jq3: do jq3=iq3,iq3+1
+               if(jq3>nc3) cycle lp_jq3
+               rcl    = (jq3-1)*hc3+dcoml
+               stm2   = sthmax2(rpmax,dcang(i),rcl)
+               dltdec = 2.0d0*asin(stm2)*rad2deg
+               jq1m   = int(dltdec/hc1)+1
+               if(jq3==iq3) then
+                  jq1min = iq1
+               else
+                  jq1min = iq1-jq1m
+               end if
+               lp_jq1: do jq1=jq1min,iq1+jq1m
+                  if(jq1>nc1.or.jq1<1) cycle lp_jq1
+                  if(jq1==iq1) then
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+                  else
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+                  end if
+                  jq2m   = int(dltra/hc2)+1
+                  jq2max = iq2+jq2m
+                  jq2min = iq2-jq2m
+                  if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+                  lp_jq2: do jq2=jq2min,jq2max
+                     if(jq2>nc2) then
+                        jq2t = jq2-nc2
+                     else if(jq2<1) then
+                        jq2t = jq2+nc2
+                     else
+                        jq2t = jq2
+                     end if
+                     if(jq3==iq3.and.jq2t<iq2.and.jq1==iq1) cycle lp_jq2
+                     if(jq3==iq3.and.jq2t==iq2.and.jq1==iq1) then
+                        j = ll(i)
+                     else
+                        j = sk(jq3,jq2t,jq1)
+                     endif
+                     xi  = x(i)
+                     yi  = y(i)
+                     zi  = z(i)
+                     dc_i = dc(i)
+                     ilib = idx(i)
+                     chi_lo_i = grid(lo(ilib))
+                     chi_hi_i = grid(hi(ilib))
+
+                     do while(j/=0)
+                        rv = abs(dc_i-dc(j))
+                        if(rv<=rvmax) then
+                           jlib = idx(j)
+                           chi_lo_j = grid(lo(jlib))
+                           chi_hi_j = grid(hi(jlib))
+                           if(chi_hi_i < chi_lo_j - pimax .or. chi_hi_j < chi_lo_i - pimax) then
+                              j = ll(j)
+                              cycle
+                           endif
+                           ang2 = ((xi-x(j))**2 + (yi-y(j))**2 + (zi-z(j))**2)
+                           if(ang2>0.0d0) then
+                              rp2min_pair = ang2 * (chi_lo_i * chi_lo_j)
+                              rp2max_pair = ang2 * (chi_hi_i * chi_hi_j)
+                              if(rp2min_pair<=rpmax2 .and. rp2max_pair>=rpmin2) then
+                                 wpair = dble(wei(i))*dble(wei(j))
+                                 if(wfib==1) then
+                                    shth2 = ang2/4.0d0
+                                    wpair = wpair*wfiber(shth2)
+                                 endif
+                                 call accum_exact_grid_pair_sparse_boot(nsepp,sepp2,nsepv,sepv,ang2,grid, &
+                                      prob(:,ilib),cdf(:,jlib),act_idx,act_start(ilib),act_count(ilib), &
+                                      lo(jlib),hi(jlib),wpair,nbts,wbts(:,i),wbts(:,j),aapv,baapv)
+                              endif
+                           endif
+                        else
+                           if(jq3>iq3) cycle lp_jq2
+                        endif
+                        j = ll(j)
+                     end do
+
+                  end do lp_jq2
+               end do lp_jq1
+            end do lp_jq3
+            i = ll(i)
+         end do
+      end do
+   end do
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Ab_grid_wp_wg
+
+
+
+
+subroutine rppi_Ajk_grid_wp(nt,npt,dec,dc,dcang,x,y,z,ngrid,nlib,grid,prob,cdf,lo,hi,idx, &
+           nact,act_idx,act_start,act_count,reg,nreg,nsepp,sepp,nsepv,sepv,rvsearch, &
+           sbound,mxh1,mxh2,mxh3,cntid,logf,progressf,sk,ll,aapv,touch)
+!===============================================================================
+! Jackknife-touch exact common-grid PDF version of rppi_A_grid_wp().
+implicit none
+integer       :: nt,nthr,npt,nsepp,nsepv,mxh1,mxh2,mxh3,ngrid,nlib,nact,nreg
+real(kind=8)  :: dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: grid(ngrid),prob(ngrid,nlib),cdf(ngrid,nlib),sepp(nsepp+1),sepv(nsepv+1)
+integer       :: lo(nlib),hi(nlib),idx(npt),act_idx(nact),act_start(nlib),act_count(nlib),reg(npt)
+real(kind=8)  :: sbound(6),aapv(nsepv,nsepp),touch(nreg,nsepv,nsepp)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,yi,zi,dc_i,ang2
+real(kind=8)  :: sepp2(nsepp+1),rpmin2,rpmax,rpmax2,rvmax,rv,rvsearch,pimax
+real(kind=8)  :: chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair
+integer       :: sk(mxh3,mxh2,mxh1),ll(npt),nc1,nc2,nc3
+integer       :: i,j,iq1,iq2,iq3,jq1,jq2,jq3,jq1min,jq2min,jq2max,jq2t,jq1m,jq2m
+integer       :: ilib,jlib,regi,regj
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+aapv   = 0.0d0
+touch  = 0.0d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmin2 = sepp2(1)
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(nsepv+1)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:aapv,touch) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m,jq1min) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,yi,zi,dc_i,rv,ang2) &
+!$omp& private(ilib,jlib,regi,regj,chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair) &
+!$omp& schedule(dynamic) if(nthr>1)
+do iq1=1,nc1
+   !$omp critical
+   call write_progress_stripe(cntid,iq1,mxh1,progressf)
+   write(11,*) cntid//' counting in DEC strip > ',iq1,'/',mxh1
+   flush(11)
+   !$omp end critical
+   do iq2=1,nc2
+      do iq3=1,nc3
+         i = sk(iq3,iq2,iq1)
+         do while(i/=0)
+            regi = reg(i) + 1
+            lp_jq3: do jq3=iq3,iq3+1
+               if(jq3>nc3) cycle lp_jq3
+               rcl    = (jq3-1)*hc3+dcoml
+               stm2   = sthmax2(rpmax,dcang(i),rcl)
+               dltdec = 2.0d0*asin(stm2)*rad2deg
+               jq1m   = int(dltdec/hc1)+1
+               if(jq3==iq3) then
+                  jq1min = iq1
+               else
+                  jq1min = iq1-jq1m
+               end if
+               lp_jq1: do jq1=jq1min,iq1+jq1m
+                  if(jq1>nc1.or.jq1<1) cycle lp_jq1
+                  if(jq1==iq1) then
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+                  else
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+                  end if
+                  jq2m   = int(dltra/hc2)+1
+                  jq2max = iq2+jq2m
+                  jq2min = iq2-jq2m
+                  if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+                  lp_jq2: do jq2=jq2min,jq2max
+                     if(jq2>nc2) then
+                        jq2t = jq2-nc2
+                     else if(jq2<1) then
+                        jq2t = jq2+nc2
+                     else
+                        jq2t = jq2
+                     end if
+                     if(jq3==iq3.and.jq2t<iq2.and.jq1==iq1) cycle lp_jq2
+                     if(jq3==iq3.and.jq2t==iq2.and.jq1==iq1) then
+                        j = ll(i)
+                     else
+                        j = sk(jq3,jq2t,jq1)
+                     endif
+                     xi  = x(i)
+                     yi  = y(i)
+                     zi  = z(i)
+                     dc_i = dc(i)
+                     ilib = idx(i)
+                     chi_lo_i = grid(lo(ilib))
+                     chi_hi_i = grid(hi(ilib))
+
+                     do while(j/=0)
+                        rv = abs(dc_i-dc(j))
+                        if(rv<=rvmax) then
+                           jlib = idx(j)
+                           regj = reg(j) + 1
+                           chi_lo_j = grid(lo(jlib))
+                           chi_hi_j = grid(hi(jlib))
+                           if(chi_hi_i < chi_lo_j - pimax .or. chi_hi_j < chi_lo_i - pimax) then
+                              j = ll(j)
+                              cycle
+                           endif
+                           ang2 = ((xi-x(j))**2 + (yi-y(j))**2 + (zi-z(j))**2)
+                           if(ang2>0.0d0) then
+                              rp2min_pair = ang2 * (chi_lo_i * chi_lo_j)
+                              rp2max_pair = ang2 * (chi_hi_i * chi_hi_j)
+                              if(rp2min_pair<=rpmax2 .and. rp2max_pair>=rpmin2) then
+                                 call accum_exact_grid_pair_sparse_touch(nsepp,sepp2,nsepv,sepv,ang2,grid, &
+                                      prob(:,ilib),cdf(:,jlib),act_idx,act_start(ilib),act_count(ilib), &
+                                      lo(jlib),hi(jlib),1.0d0,nreg,regi,regj,aapv,touch)
+                              endif
+                           endif
+                        else
+                           if(jq3>iq3) cycle lp_jq2
+                        endif
+                        j = ll(j)
+                     end do
+
+                  end do lp_jq2
+               end do lp_jq1
+            end do lp_jq3
+            i = ll(i)
+         end do
+      end do
+   end do
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Ajk_grid_wp
+
+
+subroutine rppi_Ajk_grid_wp_wg(nt,npt,dec,dc,dcang,wei,x,y,z,ngrid,nlib,grid,prob,cdf,lo,hi,idx, &
+           nact,act_idx,act_start,act_count,reg,nreg,nsepp,sepp,nsepv,sepv,rvsearch, &
+           sbound,mxh1,mxh2,mxh3,wfib,cntid,logf,progressf,sk,ll,aapv,touch)
+!===============================================================================
+! Weighted jackknife-touch exact common-grid PDF version of rppi_A_grid_wp().
+implicit none
+integer       :: nt,nthr,npt,nsepp,nsepv,mxh1,mxh2,mxh3,ngrid,nlib,nact,nreg,wfib
+real(kind=8)  :: dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=4)  :: wei(npt)
+real(kind=8)  :: grid(ngrid),prob(ngrid,nlib),cdf(ngrid,nlib),sepp(nsepp+1),sepv(nsepv+1)
+integer       :: lo(nlib),hi(nlib),idx(npt),act_idx(nact),act_start(nlib),act_count(nlib),reg(npt)
+real(kind=8)  :: sbound(6),aapv(nsepv,nsepp),touch(nreg,nsepv,nsepp)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,yi,zi,dc_i,ang2,wpair,shth2
+real(kind=8)  :: sepp2(nsepp+1),rpmin2,rpmax,rpmax2,rvmax,rv,rvsearch,pimax
+real(kind=8)  :: chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair
+integer       :: sk(mxh3,mxh2,mxh1),ll(npt),nc1,nc2,nc3
+integer       :: i,j,iq1,iq2,iq3,jq1,jq2,jq3,jq1min,jq2min,jq2max,jq2t,jq1m,jq2m
+integer       :: ilib,jlib,regi,regj
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+aapv   = 0.0d0
+touch  = 0.0d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmin2 = sepp2(1)
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(nsepv+1)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:aapv,touch) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m,jq1min) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,yi,zi,dc_i,rv,ang2,wpair,shth2) &
+!$omp& private(ilib,jlib,regi,regj,chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair) &
+!$omp& schedule(dynamic) if(nthr>1)
+do iq1=1,nc1
+   !$omp critical
+   call write_progress_stripe(cntid,iq1,mxh1,progressf)
+   write(11,*) cntid//' counting in DEC strip > ',iq1,'/',mxh1
+   flush(11)
+   !$omp end critical
+   do iq2=1,nc2
+      do iq3=1,nc3
+         i = sk(iq3,iq2,iq1)
+         do while(i/=0)
+            regi = reg(i) + 1
+            lp_jq3: do jq3=iq3,iq3+1
+               if(jq3>nc3) cycle lp_jq3
+               rcl    = (jq3-1)*hc3+dcoml
+               stm2   = sthmax2(rpmax,dcang(i),rcl)
+               dltdec = 2.0d0*asin(stm2)*rad2deg
+               jq1m   = int(dltdec/hc1)+1
+               if(jq3==iq3) then
+                  jq1min = iq1
+               else
+                  jq1min = iq1-jq1m
+               end if
+               lp_jq1: do jq1=jq1min,iq1+jq1m
+                  if(jq1>nc1.or.jq1<1) cycle lp_jq1
+                  if(jq1==iq1) then
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+                  else
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+                  end if
+                  jq2m   = int(dltra/hc2)+1
+                  jq2max = iq2+jq2m
+                  jq2min = iq2-jq2m
+                  if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+                  lp_jq2: do jq2=jq2min,jq2max
+                     if(jq2>nc2) then
+                        jq2t = jq2-nc2
+                     else if(jq2<1) then
+                        jq2t = jq2+nc2
+                     else
+                        jq2t = jq2
+                     end if
+                     if(jq3==iq3.and.jq2t<iq2.and.jq1==iq1) cycle lp_jq2
+                     if(jq3==iq3.and.jq2t==iq2.and.jq1==iq1) then
+                        j = ll(i)
+                     else
+                        j = sk(jq3,jq2t,jq1)
+                     endif
+                     xi  = x(i)
+                     yi  = y(i)
+                     zi  = z(i)
+                     dc_i = dc(i)
+                     ilib = idx(i)
+                     chi_lo_i = grid(lo(ilib))
+                     chi_hi_i = grid(hi(ilib))
+
+                     do while(j/=0)
+                        rv = abs(dc_i-dc(j))
+                        if(rv<=rvmax) then
+                           jlib = idx(j)
+                           regj = reg(j) + 1
+                           chi_lo_j = grid(lo(jlib))
+                           chi_hi_j = grid(hi(jlib))
+                           if(chi_hi_i < chi_lo_j - pimax .or. chi_hi_j < chi_lo_i - pimax) then
+                              j = ll(j)
+                              cycle
+                           endif
+                           ang2 = ((xi-x(j))**2 + (yi-y(j))**2 + (zi-z(j))**2)
+                           if(ang2>0.0d0) then
+                              rp2min_pair = ang2 * (chi_lo_i * chi_lo_j)
+                              rp2max_pair = ang2 * (chi_hi_i * chi_hi_j)
+                              if(rp2min_pair<=rpmax2 .and. rp2max_pair>=rpmin2) then
+                                 wpair = dble(wei(i))*dble(wei(j))
+                                 if(wfib==1) then
+                                    shth2 = ang2/4.0d0
+                                    wpair = wpair*wfiber(shth2)
+                                 endif
+                                 call accum_exact_grid_pair_sparse_touch(nsepp,sepp2,nsepv,sepv,ang2,grid, &
+                                      prob(:,ilib),cdf(:,jlib),act_idx,act_start(ilib),act_count(ilib), &
+                                      lo(jlib),hi(jlib),wpair,nreg,regi,regj,aapv,touch)
+                              endif
+                           endif
+                        else
+                           if(jq3>iq3) cycle lp_jq2
+                        endif
+                        j = ll(j)
+                     end do
+
+                  end do lp_jq2
+               end do lp_jq1
+            end do lp_jq3
+            i = ll(i)
+         end do
+      end do
+   end do
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Ajk_grid_wp_wg
+
+
+subroutine rppi_Ajk_gmm_wp(nt,npt,dec,dc,dcang,x,y,z,kpdf,nlib,alpha,mu,sig,idx,reg,nreg, &
+           nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3, &
+           cntid,logf,progressf,sk,ll,aapv,touch)
+!===============================================================================
+! Jackknife-touch version of rppi_A_gmm_wp().
+! Supports both single-wide-pi and multi-pi output. The touch array keeps
+! the same (region, pi, rp) shape as the standard counters so the Python
+! layer can reconstruct delete-one-region realizations via subtraction.
+implicit none
+integer       :: nt,nthr,npt,nsepp,nsepv,mxh1,mxh2,mxh3,kpdf,nlib,nreg
+real(kind=8)  :: dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: alpha(kpdf,nlib),mu(kpdf,nlib),sig(kpdf,nlib),sepp(nsepp+1),sepv(nsepv+1)
+integer       :: idx(npt),reg(npt)
+real(kind=8)  :: sbound(6),aapv(nsepv,nsepp),touch(nreg,nsepv,nsepp)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3,rp2
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,yi,zi,dc_i,ang2
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rvmax,rv,rvsearch,probfloor
+real(kind=8)  :: pimax,muD,sigD,ppi,wcomp,wpair
+integer       :: sk(mxh3,mxh2,mxh1),ll(npt),nc1,nc2,nc3
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq1min,jq2min,jq2max,jq2t,jq1m,jq2m
+integer       :: ilib,jlib,kk,llc,regi,regj,ip,ibin
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+aapv   = 0.0d0
+touch  = 0.0d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(2)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:aapv,touch) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m,jq1min) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,yi,zi,dc_i,rv,ang2,ii) &
+!$omp& private(ilib,jlib,kk,llc,ip,ibin,muD,sigD,ppi,wcomp,wpair,rp2,regi,regj) &
+!$omp& schedule(dynamic) if(nthr>1)
+do iq1=1,nc1
+   !$omp critical
+   call write_progress_stripe(cntid,iq1,mxh1,progressf)
+   write(11,*) cntid//' counting in DEC strip > ',iq1,'/',mxh1
+   flush(11)
+   !$omp end critical
+   do iq2=1,nc2
+      do iq3=1,nc3
+         i = sk(iq3,iq2,iq1)
+         do while(i/=0)
+            regi = reg(i) + 1
+            lp_jq3: do jq3=iq3,iq3+1
+               if(jq3>nc3) cycle lp_jq3
+               rcl    = (jq3-1)*hc3+dcoml
+               stm2   = sthmax2(rpmax,dcang(i),rcl)
+               dltdec = 2.0d0*asin(stm2)*rad2deg
+               jq1m   = int(dltdec/hc1)+1
+               if(jq3==iq3) then
+                  jq1min = iq1
+               else
+                  jq1min = iq1-jq1m
+               end if
+               lp_jq1: do jq1=jq1min,iq1+jq1m
+                  if(jq1>nc1.or.jq1<1) cycle lp_jq1
+                  if(jq1==iq1) then
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+                  else
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+                  end if
+                  jq2m   = int(dltra/hc2)+1
+                  jq2max = iq2+jq2m
+                  jq2min = iq2-jq2m
+                  if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+                  lp_jq2: do jq2=jq2min,jq2max
+                     if(jq2>nc2) then
+                        jq2t = jq2-nc2
+                     else if(jq2<1) then
+                        jq2t = jq2+nc2
+                     else
+                        jq2t = jq2
+                     end if
+                     if(jq3==iq3.and.jq2t<iq2.and.jq1==iq1) cycle lp_jq2
+                     if(jq3==iq3.and.jq2t==iq2.and.jq1==iq1) then
+                        j = ll(i)
+                     else
+                        j = sk(jq3,jq2t,jq1)
+                     endif
+                     xi  = x(i)
+                     yi  = y(i)
+                     zi  = z(i)
+                     dc_i = dc(i)
+                     ilib = idx(i)
+
+                     do while(j/=0)
+                        rv = abs(dc_i-dc(j))
+                        if(rv<=rvmax) then
+                           ang2 = ((xi-x(j))**2 + (yi-y(j))**2 + (zi-z(j))**2)
+                           if(ang2>0.0d0) then
+                              jlib = idx(j)
+                              regj = reg(j) + 1
+                              do kk=1,kpdf
+                                 do llc=1,kpdf
+                                    wcomp = alpha(kk,ilib)*alpha(llc,jlib)
+                                    if(wcomp<=probfloor) cycle
+                                    rp2 = mu(kk,ilib)*mu(llc,jlib)*ang2
+                                    if(rp2>rpmax2) cycle
+
+                                    muD = mu(kk,ilib) - mu(llc,jlib)
+                                    sigD = sqrt(sig(kk,ilib)*sig(kk,ilib) + sig(llc,jlib)*sig(llc,jlib))
+
+                                    ibin = 0
+                                    if(rp2>sepp2(nsepp)) then
+                                       ibin = nsepp
+                                    else
+                                       do ii=nsepp-1,1,-1
+                                          if(rp2>sepp2(ii)) then
+                                             ibin = ii
+                                             exit
+                                          endif
+                                       enddo
+                                    endif
+                                    if(ibin<=0) cycle
+
+                                    do ip=1,nsepv
+                                       ppi = gmm_abs_shell_prob(muD, sigD, sepv(ip), sepv(ip+1))
+                                       if ((nsepv == 1 .and. ppi > probfloor) .or. &
+                                           (nsepv > 1 .and. ppi > 0.0d0)) then
+                                          wpair = wcomp*ppi
+                                          aapv(ip,ibin) = aapv(ip,ibin) + wpair
+                                          touch(regi,ip,ibin) = touch(regi,ip,ibin) + wpair
+                                          if(regj/=regi) then
+                                             touch(regj,ip,ibin) = touch(regj,ip,ibin) + wpair
+                                          endif
+                                       endif
+                                    enddo
+                                 enddo
+                              enddo
+                           endif
+                        else
+                           if(jq3>iq3) cycle lp_jq2
+                        endif
+                        j = ll(j)
+                     enddo
+                  enddo lp_jq2
+               enddo lp_jq1
+            enddo lp_jq3
+            i = ll(i)
+         enddo
+      enddo
+   enddo
+enddo
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Ajk_gmm_wp
+
+
+subroutine rppi_Ajk_gmm_wp_wg(nt,npt,dec,dc,dcang,wei,x,y,z,kpdf,nlib,alpha,mu,sig,idx,reg,nreg, &
+           nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,wfib, &
+           cntid,logf,progressf,sk,ll,aapv,touch)
+!===============================================================================
+! Weighted jackknife-touch version of rppi_A_gmm_wp(). Supports both
+! single-wide-pi and multi-pi output.
+implicit none
+integer       :: nt,nthr,npt,nsepp,nsepv,mxh1,mxh2,mxh3,kpdf,nlib,wfib,nreg
+real(kind=8)  :: dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=4)  :: wei(npt),wi
+real(kind=8)  :: alpha(kpdf,nlib),mu(kpdf,nlib),sig(kpdf,nlib),sepp(nsepp+1),sepv(nsepv+1)
+integer       :: idx(npt),reg(npt)
+real(kind=8)  :: sbound(6),aapv(nsepv,nsepp),touch(nreg,nsepv,nsepp)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3,rp2
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,yi,zi,dc_i,ang2
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rvmax,rv,rvsearch,probfloor
+real(kind=8)  :: pimax,muD,sigD,ppi,wcomp,wpair,shth2
+integer       :: sk(mxh3,mxh2,mxh1),ll(npt),nc1,nc2,nc3
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq1min,jq2min,jq2max,jq2t,jq1m,jq2m
+integer       :: ilib,jlib,kk,llc,regi,regj,ip,ibin
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+aapv   = 0.0d0
+touch  = 0.0d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(2)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:aapv,touch) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m,jq1min) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,yi,zi,dc_i,rv,ang2,ii,wi,shth2) &
+!$omp& private(ilib,jlib,kk,llc,ip,ibin,muD,sigD,ppi,wcomp,wpair,rp2,regi,regj) &
+!$omp& schedule(dynamic) if(nthr>1)
+do iq1=1,nc1
+   !$omp critical
+   call write_progress_stripe(cntid,iq1,mxh1,progressf)
+   write(11,*) cntid//' counting in DEC strip > ',iq1,'/',mxh1
+   flush(11)
+   !$omp end critical
+   do iq2=1,nc2
+      do iq3=1,nc3
+         i = sk(iq3,iq2,iq1)
+         do while(i/=0)
+            regi = reg(i) + 1
+            lp_jq3: do jq3=iq3,iq3+1
+               if(jq3>nc3) cycle lp_jq3
+               rcl    = (jq3-1)*hc3+dcoml
+               stm2   = sthmax2(rpmax,dcang(i),rcl)
+               dltdec = 2.0d0*asin(stm2)*rad2deg
+               jq1m   = int(dltdec/hc1)+1
+               if(jq3==iq3) then
+                  jq1min = iq1
+               else
+                  jq1min = iq1-jq1m
+               end if
+               lp_jq1: do jq1=jq1min,iq1+jq1m
+                  if(jq1>nc1.or.jq1<1) cycle lp_jq1
+                  if(jq1==iq1) then
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+                  else
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+                  end if
+                  jq2m   = int(dltra/hc2)+1
+                  jq2max = iq2+jq2m
+                  jq2min = iq2-jq2m
+                  if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+                  lp_jq2: do jq2=jq2min,jq2max
+                     if(jq2>nc2) then
+                        jq2t = jq2-nc2
+                     else if(jq2<1) then
+                        jq2t = jq2+nc2
+                     else
+                        jq2t = jq2
+                     end if
+                     if(jq3==iq3.and.jq2t<iq2.and.jq1==iq1) cycle lp_jq2
+                     if(jq3==iq3.and.jq2t==iq2.and.jq1==iq1) then
+                        j = ll(i)
+                     else
+                        j = sk(jq3,jq2t,jq1)
+                     endif
+                     xi  = x(i)
+                     yi  = y(i)
+                     zi  = z(i)
+                     dc_i = dc(i)
+                     wi  = wei(i)
+                     ilib = idx(i)
+
+                     do while(j/=0)
+                        rv = abs(dc_i-dc(j))
+                        if(rv<=rvmax) then
+                           ang2 = ((xi-x(j))**2 + (yi-y(j))**2 + (zi-z(j))**2)
+                           if(ang2>0.0d0) then
+                              jlib = idx(j)
+                              regj = reg(j) + 1
+                              do kk=1,kpdf
+                                 do llc=1,kpdf
+                                    wcomp = alpha(kk,ilib)*alpha(llc,jlib)
+                                    if(wcomp<=probfloor) cycle
+                                    rp2 = mu(kk,ilib)*mu(llc,jlib)*ang2
+                                    if(rp2>rpmax2) cycle
+
+                                    muD = mu(kk,ilib) - mu(llc,jlib)
+                                    sigD = sqrt(sig(kk,ilib)*sig(kk,ilib) + sig(llc,jlib)*sig(llc,jlib))
+
+                                    ibin = 0
+                                    if(rp2>sepp2(nsepp)) then
+                                       ibin = nsepp
+                                    else
+                                       do ii=nsepp-1,1,-1
+                                          if(rp2>sepp2(ii)) then
+                                             ibin = ii
+                                             exit
+                                          endif
+                                       enddo
+                                    endif
+                                    if(ibin<=0) cycle
+
+                                    do ip=1,nsepv
+                                       ppi = gmm_abs_shell_prob(muD, sigD, sepv(ip), sepv(ip+1))
+                                       if ((nsepv == 1 .and. ppi > probfloor) .or. &
+                                           (nsepv > 1 .and. ppi > 0.0d0)) then
+                                          wpair = dble(wi)*dble(wei(j))*wcomp*ppi
+                                          if(wfib==1) then
+                                             shth2 = ang2/4.0d0
+                                             wpair = wpair*wfiber(shth2)
+                                          endif
+                                          aapv(ip,ibin) = aapv(ip,ibin) + wpair
+                                          touch(regi,ip,ibin) = touch(regi,ip,ibin) + wpair
+                                          if(regj/=regi) then
+                                             touch(regj,ip,ibin) = touch(regj,ip,ibin) + wpair
+                                          endif
+                                       endif
+                                    enddo
+                                 enddo
+                              enddo
+                           endif
+                        else
+                           if(jq3>iq3) cycle lp_jq2
+                        endif
+                        j = ll(j)
+                     enddo
+                  enddo lp_jq2
+               enddo lp_jq1
+            enddo lp_jq3
+            i = ll(i)
+         enddo
+      enddo
+   enddo
+enddo
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Ajk_gmm_wp_wg
+
+
+subroutine rppi_Ab_gmm_wp(nt,npt,dec,dc,dcang,x,y,z,kpdf,nlib,alpha,mu,sig,idx, &
+           nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,nbts,bseed, &
+           cntid,logf,progressf,sk,ll,aapv,baapv)
+!===============================================================================
+! Bootstrap version of rppi_A_gmm_wp(). Counts full and bootstrap pair totals
+! in one pass through the projected/GMM pair search.
+implicit none
+integer       :: nt,nthr,npt,nsepp,nsepv,mxh1,mxh2,mxh3,kpdf,nlib,nbts,bseed
+real(kind=8)  :: dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: alpha(kpdf,nlib),mu(kpdf,nlib),sig(kpdf,nlib),sepp(nsepp+1),sepv(nsepv+1)
+integer       :: idx(npt)
+real(kind=8)  :: sbound(6),aapv(nsepv,nsepp),baapv(nbts,nsepp,nsepv)
+real(kind=4)  :: wbts(nbts,npt)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3,rp2,wpair
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,yi,zi,dc_i,ang2
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rvmax,rv,rvsearch,probfloor
+real(kind=8)  :: pimax,muD,sigD,ppi,wcomp
+integer       :: sk(mxh3,mxh2,mxh1),ll(npt),nc1,nc2,nc3
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq1min,jq2min,jq2max,jq2t,jq1m,jq2m
+integer       :: ilib,jlib,kk,llc,ip,ibin
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+aapv   = 0.0d0
+baapv  = 0.0d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(2)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+call bootstrap(npt,nbts,bseed,wbts)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:aapv,baapv) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m,jq1min) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,yi,zi,dc_i,rv,ang2,ii) &
+!$omp& private(ilib,jlib,kk,llc,ip,ibin,muD,sigD,ppi,wcomp,rp2,wpair) &
+!$omp& schedule(dynamic) if(nthr>1)
+do iq1=1,nc1
+   !$omp critical
+   call write_progress_stripe(cntid,iq1,mxh1,progressf)
+   write(11,*) cntid//' counting in DEC strip > ',iq1,'/',mxh1
+   flush(11)
+   !$omp end critical
+   do iq2=1,nc2
+      do iq3=1,nc3
+         i = sk(iq3,iq2,iq1)
+         do while(i/=0)
+            lp_jq3: do jq3=iq3,iq3+1
+               if(jq3>nc3) cycle lp_jq3
+               rcl    = (jq3-1)*hc3+dcoml
+               stm2   = sthmax2(rpmax,dcang(i),rcl)
+               dltdec = 2.0d0*asin(stm2)*rad2deg
+               jq1m   = int(dltdec/hc1)+1
+               if(jq3==iq3) then
+                  jq1min = iq1
+               else
+                  jq1min = iq1-jq1m
+               end if
+               lp_jq1: do jq1=jq1min,iq1+jq1m
+                  if(jq1>nc1.or.jq1<1) cycle lp_jq1
+                  if(jq1==iq1) then
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+                  else
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+                  end if
+                  jq2m   = int(dltra/hc2)+1
+                  jq2max = iq2+jq2m
+                  jq2min = iq2-jq2m
+                  if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+                  lp_jq2: do jq2=jq2min,jq2max
+                     if(jq2>nc2) then
+                        jq2t = jq2-nc2
+                     else if(jq2<1) then
+                        jq2t = jq2+nc2
+                     else
+                        jq2t = jq2
+                     end if
+                     if(jq3==iq3.and.jq2t<iq2.and.jq1==iq1) cycle lp_jq2
+                     if(jq3==iq3.and.jq2t==iq2.and.jq1==iq1) then
+                        j = ll(i)
+                     else
+                        j = sk(jq3,jq2t,jq1)
+                     endif
+                     xi  = x(i)
+                     yi  = y(i)
+                     zi  = z(i)
+                     dc_i = dc(i)
+                     ilib = idx(i)
+
+                     do while(j/=0)
+                        rv = abs(dc_i-dc(j))
+                        if(rv<=rvmax) then
+                           ang2 = ((xi-x(j))**2 + (yi-y(j))**2 + (zi-z(j))**2)
+                           if(ang2>0.0d0) then
+                              jlib = idx(j)
+                              do kk=1,kpdf
+                                 do llc=1,kpdf
+                                    wcomp = alpha(kk,ilib)*alpha(llc,jlib)
+                                    if(wcomp<=probfloor) cycle
+                                    rp2 = mu(kk,ilib)*mu(llc,jlib)*ang2
+                                    if(rp2>rpmax2) cycle
+
+                                    muD = mu(kk,ilib) - mu(llc,jlib)
+                                    sigD = sqrt(sig(kk,ilib)*sig(kk,ilib) + sig(llc,jlib)*sig(llc,jlib))
+
+                                    ibin = 0
+                                    if(rp2>sepp2(nsepp)) then
+                                       ibin = nsepp
+                                    else
+                                       do ii=nsepp-1,1,-1
+                                          if(rp2>sepp2(ii)) then
+                                             ibin = ii
+                                             exit
+                                          endif
+                                       enddo
+                                    endif
+                                    if(ibin<=0) cycle
+
+                                    do ip=1,nsepv
+                                       ppi = gmm_abs_shell_prob(muD, sigD, sepv(ip), sepv(ip+1))
+                                       if ((nsepv == 1 .and. ppi > probfloor) .or. &
+                                           (nsepv > 1 .and. ppi > 0.0d0)) then
+                                          wpair = wcomp*ppi
+                                          aapv(ip,ibin) = aapv(ip,ibin) + wpair
+                                          baapv(:,ibin,ip) = baapv(:,ibin,ip) + &
+                                               wpair*wbts(:,i)*wbts(:,j)
+                                       endif
+                                    enddo
+                                 enddo
+                              enddo
+                           endif
+                        else
+                           if(jq3>iq3) cycle lp_jq2
+                        endif
+                        j = ll(j)
+                     end do
+                  end do lp_jq2
+               end do lp_jq1
+            end do lp_jq3
+            i = ll(i)
+         end do
+      end do
+   end do
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Ab_gmm_wp
+
+
+subroutine rppi_Ab_gmm_wp_wg(nt,npt,dec,dc,dcang,wei,x,y,z,kpdf,nlib,alpha,mu,sig,idx, &
+           nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,nbts,bseed,wfib, &
+           cntid,logf,progressf,sk,ll,aapv,baapv,normb,sumwb)
+!===============================================================================
+! Weighted bootstrap version of rppi_A_gmm_wp().
+implicit none
+integer       :: nt,nthr,npt,nsepp,nsepv,mxh1,mxh2,mxh3,kpdf,nlib,nbts,bseed,wfib
+real(kind=8)  :: dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=4)  :: wei(npt),wi
+real(kind=8)  :: alpha(kpdf,nlib),mu(kpdf,nlib),sig(kpdf,nlib),sepp(nsepp+1),sepv(nsepv+1)
+integer       :: idx(npt)
+real(kind=8)  :: sbound(6),aapv(nsepv,nsepp),baapv(nbts,nsepp,nsepv),normb(nbts),sumwb(nbts)
+real(kind=4)  :: wbts(nbts,npt)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3,rp2,wpair
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,yi,zi,dc_i,ang2
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rvmax,rv,rvsearch,probfloor
+real(kind=8)  :: pimax,muD,sigD,ppi,wcomp,shth2
+integer       :: sk(mxh3,mxh2,mxh1),ll(npt),nc1,nc2,nc3
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq1min,jq2min,jq2max,jq2t,jq1m,jq2m
+integer       :: ilib,jlib,kk,llc,ip,ibin
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+aapv   = 0.0d0
+baapv  = 0.0d0
+normb  = 0.0d0
+sumwb  = 0.0d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(2)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+call bootstrap(npt,nbts,bseed,wbts)
+call bootstrap_weight_stats(npt,nbts,wei,wbts,sumwb,normb)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:aapv,baapv) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m,jq1min) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,yi,zi,dc_i,rv,ang2,ii,wi,shth2) &
+!$omp& private(ilib,jlib,kk,llc,ip,ibin,muD,sigD,ppi,wcomp,rp2,wpair) &
+!$omp& schedule(dynamic) if(nthr>1)
+do iq1=1,nc1
+   !$omp critical
+   call write_progress_stripe(cntid,iq1,mxh1,progressf)
+   write(11,*) cntid//' counting in DEC strip > ',iq1,'/',mxh1
+   flush(11)
+   !$omp end critical
+   do iq2=1,nc2
+      do iq3=1,nc3
+         i = sk(iq3,iq2,iq1)
+         do while(i/=0)
+            lp_jq3: do jq3=iq3,iq3+1
+               if(jq3>nc3) cycle lp_jq3
+               rcl    = (jq3-1)*hc3+dcoml
+               stm2   = sthmax2(rpmax,dcang(i),rcl)
+               dltdec = 2.0d0*asin(stm2)*rad2deg
+               jq1m   = int(dltdec/hc1)+1
+               if(jq3==iq3) then
+                  jq1min = iq1
+               else
+                  jq1min = iq1-jq1m
+               end if
+               lp_jq1: do jq1=jq1min,iq1+jq1m
+                  if(jq1>nc1.or.jq1<1) cycle lp_jq1
+                  if(jq1==iq1) then
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+                  else
+                     dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+                  end if
+                  jq2m   = int(dltra/hc2)+1
+                  jq2max = iq2+jq2m
+                  jq2min = iq2-jq2m
+                  if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+                  lp_jq2: do jq2=jq2min,jq2max
+                     if(jq2>nc2) then
+                        jq2t = jq2-nc2
+                     else if(jq2<1) then
+                        jq2t = jq2+nc2
+                     else
+                        jq2t = jq2
+                     end if
+                     if(jq3==iq3.and.jq2t<iq2.and.jq1==iq1) cycle lp_jq2
+                     if(jq3==iq3.and.jq2t==iq2.and.jq1==iq1) then
+                        j = ll(i)
+                     else
+                        j = sk(jq3,jq2t,jq1)
+                     endif
+                     xi  = x(i)
+                     yi  = y(i)
+                     zi  = z(i)
+                     dc_i = dc(i)
+                     wi  = wei(i)
+                     ilib = idx(i)
+
+                     do while(j/=0)
+                        rv = abs(dc_i-dc(j))
+                        if(rv<=rvmax) then
+                           ang2 = ((xi-x(j))**2 + (yi-y(j))**2 + (zi-z(j))**2)
+                           if(ang2>0.0d0) then
+                              jlib = idx(j)
+                              do kk=1,kpdf
+                                 do llc=1,kpdf
+                                    wcomp = alpha(kk,ilib)*alpha(llc,jlib)
+                                    if(wcomp<=probfloor) cycle
+                                    rp2 = mu(kk,ilib)*mu(llc,jlib)*ang2
+                                    if(rp2>rpmax2) cycle
+
+                                    muD = mu(kk,ilib) - mu(llc,jlib)
+                                    sigD = sqrt(sig(kk,ilib)*sig(kk,ilib) + sig(llc,jlib)*sig(llc,jlib))
+
+                                    ibin = 0
+                                    if(rp2>sepp2(nsepp)) then
+                                       ibin = nsepp
+                                    else
+                                       do ii=nsepp-1,1,-1
+                                          if(rp2>sepp2(ii)) then
+                                             ibin = ii
+                                             exit
+                                          endif
+                                       enddo
+                                    endif
+                                    if(ibin<=0) cycle
+
+                                    do ip=1,nsepv
+                                       ppi = gmm_abs_shell_prob(muD, sigD, sepv(ip), sepv(ip+1))
+                                       if ((nsepv == 1 .and. ppi > probfloor) .or. &
+                                           (nsepv > 1 .and. ppi > 0.0d0)) then
+                                          wpair = dble(wi)*dble(wei(j))*wcomp*ppi
+                                          if(wfib==1) then
+                                             shth2 = ang2/4.0d0
+                                             wpair = wpair*wfiber(shth2)
+                                          endif
+                                          aapv(ip,ibin) = aapv(ip,ibin) + wpair
+                                          baapv(:,ibin,ip) = baapv(:,ibin,ip) + &
+                                               wpair*wbts(:,i)*wbts(:,j)
+                                       endif
+                                    enddo
+                                 enddo
+                              enddo
+                           endif
+                        else
+                           if(jq3>iq3) cycle lp_jq2
+                        endif
+                        j = ll(j)
+                     end do
+                  end do lp_jq2
+               end do lp_jq1
+            end do lp_jq3
+            i = ll(i)
+         end do
+      end do
+   end do
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Ab_gmm_wp_wg
+
 
 subroutine rppi_Ab(nt,npt,dec,dc,x,y,z,nsepp,sepp,nsepv,sepv,sbound, &
            mxh1,mxh2,mxh3,nbts,bseed,cntid,logf,progressf,sk,ll,aapv,baapv)
@@ -2392,6 +5754,7 @@ dcoml = sbound(5) ; dcomu = sbound(6)
 nc1 = mxh1
 nc2 = mxh2
 nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
 if(nc3>mxh3) nc3 = mxh3
 hc1 = (decu-decl)/float(nc1)     !effective nr of DEC cells
 hc2 = (rau-ral)/float(nc2)       !effective nr of RA cells
@@ -2591,6 +5954,7 @@ dcoml = sbound(5) ; dcomu = sbound(6)
 nc1 = mxh1
 nc2 = mxh2
 nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
 if(nc3>mxh3) nc3 = mxh3
 hc1 = (decu-decl)/float(nc1)     !effective nr of DEC cells
 hc2 = (rau-ral)/float(nc2)       !effective nr of RA cells
@@ -2788,6 +6152,7 @@ dcoml = sbound(5) ; dcomu = sbound(6)
 nc1 = mxh1
 nc2 = mxh2
 nc3 =int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
 if(nc3>mxh3) nc3 = mxh3
 hc1 = (decu-decl)/float(nc1)    !effective nr of DEC cells
 hc2 = (rau-ral)/float(nc2)      !effective nr of RA cells
@@ -2978,6 +6343,7 @@ dcoml = sbound(5) ; dcomu = sbound(6)
 nc1 = mxh1
 nc2 = mxh2
 nc3 =int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
 if(nc3>mxh3) nc3 = mxh3
 hc1 = (decu-decl)/float(nc1)    !effective nr of DEC cells
 hc2 = (rau-ral)/float(nc2)      !effective nr of RA cells
@@ -3093,6 +6459,2827 @@ close(11)  ! close log
 if(len_trim(progressf)==0) write(*,*) ' '
 end subroutine rppi_C_wg
 
+subroutine rppi_C_gmm_wp(nt,npt,ra,dec,dc,dcang,x,y,z,kpdf,nlib,alpha,mu,sig,idx, &
+           npt1,dc1,dcang1,x1,y1,z1,kpdf1,nlib1,alpha1,mu1,sig1,idx1, &
+           nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3, &
+           cntid,logf,progressf,sk1,ll1,cdpv)
+!===============================================================================
+! NAME
+!  rppi_C_gmm_wp()
+!
+! DESCRIPTION
+!  Cross-count expected pairs in projected space for TWO samples when both carry
+!  small Gaussian-mixture PDFs in comoving distance. v1: wp-only (nsepv=1).
+!
+implicit none
+integer       :: nt,nthr,npt,npt1,nsepp,nsepv,mxh1,mxh2,mxh3,kpdf,nlib,kpdf1,nlib1
+real(kind=8)  :: ra(npt),dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: dc1(npt1),dcang1(npt1),x1(npt1),y1(npt1),z1(npt1)
+real(kind=8)  :: alpha(kpdf,nlib),mu(kpdf,nlib),sig(kpdf,nlib),alpha1(kpdf1,*),mu1(kpdf1,*),sig1(kpdf1,*)
+integer       :: idx(npt),idx1(npt1)
+real(kind=8)  :: sepp(nsepp+1),sepv(nsepv+1),sbound(6),cdpv(nsepv,nsepp)
+integer       :: sk1(mxh3,mxh2,mxh1),ll1(npt1)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rvmax,rv,rvsearch,probfloor
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,dci,ang2,rp2
+real(kind=8)  :: muD,sigD,ppi,wcomp
+integer       :: nc1,nc2,nc3,fracp,dpart,nadv
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq2min,jq2max,jq2t,jq1m,jq2m,p1,p2
+integer       :: ilib,jlib,kk,llc,ip,ibin
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+fracp = 0 ; dpart = 0 ; nadv = 0
+cdpv   = 0.d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+! Guard against nc3==0 when rvmax exceeds the distance span.
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+dpart = int(float(npt)/float(mxh1))
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cdpv) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,dci,rv,ang2,rp2,ii) &
+!$omp& private(ilib,jlib,kk,llc,ip,ibin,muD,sigD,ppi,wcomp) &
+!$omp& schedule(guided) firstprivate(fracp) if(nthr>1)
+
+do i=1,npt
+   xi  = x(i)
+   dci = dc(i)
+   ilib = idx(i)
+
+   iq1 = int((dec(i)-decl)/hc1)+1
+   iq2 = int((ra(i)-ral)/hc2)+1
+   iq3 = int((dci-dcoml)/hc3)+1
+
+   fracp = fracp + 1
+   if(fracp>=dpart) then
+       !$omp critical
+       nadv = nadv + 1
+       p1   = (nadv-1)*dpart + 1
+       p2   = nadv*dpart
+       if((nadv+1)*dpart>npt) p2=npt
+       call write_progress_range(cntid,nadv,mxh1,p1,p2,progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',p2,')'
+       fracp = 0
+       !$omp end critical
+   endif
+
+   lp_jq3: do jq3 = iq3-1,iq3+1
+      if(jq3<1.or.jq3>nc3) cycle lp_jq3
+      rcl    = (jq3-1)*hc3+dcoml
+      stm2   = sthmax2(rpmax,dcang(i),rcl)
+      dltdec = 2.0d0*asin(stm2)*rad2deg
+      jq1m   = int(dltdec/hc1)+1
+      lp_jq1: do jq1=iq1-jq1m,iq1+jq1m
+         if(jq1>nc1.or.jq1<1) cycle lp_jq1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2max = iq2+jq2m
+         jq2min = iq2-jq2m
+         if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+         lp_jq2: do jq2=jq2min,jq2max
+            if(jq2>nc2) then
+               jq2t = jq2-nc2
+            else if(jq2<1) then
+               jq2t = jq2+nc2
+            else
+               jq2t = jq2
+            end if
+            j = sk1(jq3,jq2t,jq1)
+            do while(j/=0)
+               rv  = abs(dci-dc1(j))
+               if(rv<=rvmax) then
+                  ang2 = ((xi-x1(j))**2 + (y(i)-y1(j))**2 + (z(i)-z1(j))**2)
+                  if(ang2>0.0d0) then
+                     jlib = idx1(j)
+                     do kk=1,kpdf
+                        do llc=1,kpdf1
+                           wcomp = alpha(kk,ilib)*alpha1(llc,jlib)
+                           if(wcomp<=probfloor) cycle
+                           rp2 = mu(kk,ilib)*mu1(llc,jlib)*ang2
+                           if(rp2>rpmax2) cycle
+
+                           muD = mu(kk,ilib) - mu1(llc,jlib)
+                           sigD = sqrt(sig(kk,ilib)*sig(kk,ilib) + sig1(llc,jlib)*sig1(llc,jlib))
+
+                           ibin = 0
+                           if(rp2>sepp2(nsepp)) then
+                              ibin = nsepp
+                           else
+                              do ii=nsepp-1,1,-1
+                                 if(rp2>sepp2(ii)) then
+                                    ibin = ii
+                                    exit
+                                 endif
+                              enddo
+                           endif
+                           if(ibin<=0) cycle
+
+                           do ip=1,nsepv
+                              ppi = gmm_abs_shell_prob(muD, sigD, sepv(ip), sepv(ip+1))
+                              if ((nsepv == 1 .and. ppi > probfloor) .or. &
+                                  (nsepv > 1 .and. ppi > 0.0d0)) then
+                                 cdpv(ip,ibin) = cdpv(ip,ibin) + wcomp*ppi
+                              endif
+                           enddo
+                        enddo
+                     enddo
+                  endif
+               else
+                  if(jq3>iq3) cycle lp_jq2
+               endif
+               j = ll1(j)
+            end do
+         end do lp_jq2
+      end do lp_jq1
+   end do lp_jq3
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_C_gmm_wp
+
+
+
+subroutine rppi_C_qchi_wp(nt,npt,ra,dec,dc,dcang,x,y,z,nq,nlib,qchi,qlo,qhi,idx, &
+           npt1,dc1,dcang1,x1,y1,z1,nq1,nlib1,qchi1,qlo1,qhi1,idx1, &
+           nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,diag_enabled, &
+           cntid,logf,progressf,sk1,ll1,cdpv,qdiag)
+!===============================================================================
+! NAME
+!  rppi_C_qchi_wp()
+!
+! DESCRIPTION
+!  Cross-count expected projected pairs when both samples carry equal-probability
+!  chi quantiles.  Keeps the existing 3D SK/LL pruning and support-prunes each
+!  candidate pair before the nq*nq1 Cartesian product.
+!
+implicit none
+integer       :: nt,nthr,npt,npt1,nsepp,nsepv,mxh1,mxh2,mxh3,nq,nlib,nq1,nlib1,diag_enabled
+real(kind=8)  :: ra(npt),dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: dc1(npt1),dcang1(npt1),x1(npt1),y1(npt1),z1(npt1)
+real(kind=8)  :: qchi(nq,nlib),qlo(nlib),qhi(nlib),qchi1(nq1,nlib1),qlo1(nlib1),qhi1(nlib1)
+integer       :: idx(npt),idx1(npt1)
+real(kind=8)  :: sepp(nsepp+1),sepv(nsepv+1),sbound(6),cdpv(nsepv,nsepp)
+integer(kind=8) :: qdiag(9)
+integer       :: sk1(mxh3,mxh2,mxh1),ll1(npt1)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rpmin2,rvmax,rv,rvsearch,pimax,dsepv
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,dci,ang2,rp2
+real(kind=8)  :: qlo_i,qhi_i,qlo_j,qhi_j,rp2_min,rp2_max,chi_i,chi_j,qpi,wq
+integer       :: nc1,nc2,nc3,fracp,dpart,nadv
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq2min,jq2max,jq2t,jq1m,jq2m,p1,p2
+integer       :: ilib,jlib,qa,qb,ip,ibin
+integer(kind=8) :: nscan,nrv,npi_supp,nang_zero,nrp_supp,nprod,nqpi,nqrp,nacc
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+fracp = 0 ; dpart = 0 ; nadv = 0
+cdpv   = 0.d0
+qdiag  = 0_8
+nscan = 0_8 ; nrv = 0_8 ; npi_supp = 0_8 ; nang_zero = 0_8
+nrp_supp = 0_8 ; nprod = 0_8 ; nqpi = 0_8 ; nqrp = 0_8 ; nacc = 0_8
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+rpmin2 = sepp2(1)
+rvmax  = rvsearch
+pimax  = sepv(nsepv+1)
+if(nsepv>0) then
+   dsepv = sepv(2)-sepv(1)
+else
+   dsepv = 1.0d0
+endif
+wq     = 1.0d0 / dble(nq*nq1)
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+dpart = int(float(max(1,npt))/float(max(1,mxh1)))
+if(dpart<1) dpart = 1
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cdpv,nscan,nrv,npi_supp,nang_zero,nrp_supp,nprod,nqpi,nqrp,nacc) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,dci,rv,ang2,rp2,ii) &
+!$omp& private(ilib,jlib,qa,qb,ip,ibin,chi_i,chi_j,qpi) &
+!$omp& private(qlo_i,qhi_i,qlo_j,qhi_j,rp2_min,rp2_max) &
+!$omp& schedule(guided) firstprivate(fracp) if(nthr>1)
+
+do i=1,npt
+   xi  = x(i)
+   dci = dc(i)
+   ilib = idx(i)
+   qlo_i = qlo(ilib)
+   qhi_i = qhi(ilib)
+
+   iq1 = int((dec(i)-decl)/hc1)+1
+   iq2 = int((ra(i)-ral)/hc2)+1
+   iq3 = int((dci-dcoml)/hc3)+1
+
+   fracp = fracp + 1
+   if(fracp>=dpart) then
+       !$omp critical
+       nadv = nadv + 1
+       p1   = (nadv-1)*dpart + 1
+       p2   = nadv*dpart
+       if((nadv+1)*dpart>npt) p2=npt
+       call write_progress_range(cntid,nadv,mxh1,p1,p2,progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',p2,')'
+       fracp = 0
+       !$omp end critical
+   endif
+
+   lp_jq3: do jq3 = iq3-1,iq3+1
+      if(jq3<1.or.jq3>nc3) cycle lp_jq3
+      rcl    = (jq3-1)*hc3+dcoml
+      stm2   = sthmax2(rpmax,dcang(i),rcl)
+      dltdec = 2.0d0*asin(stm2)*rad2deg
+      jq1m   = int(dltdec/hc1)+1
+      lp_jq1: do jq1=iq1-jq1m,iq1+jq1m
+         if(jq1>nc1.or.jq1<1) cycle lp_jq1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2max = iq2+jq2m
+         jq2min = iq2-jq2m
+         if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+         lp_jq2: do jq2=jq2min,jq2max
+            if(jq2>nc2) then
+               jq2t = jq2-nc2
+            else if(jq2<1) then
+               jq2t = jq2+nc2
+            else
+               jq2t = jq2
+            end if
+            j = sk1(jq3,jq2t,jq1)
+            do while(j/=0)
+               if(diag_enabled/=0) nscan = nscan + 1_8
+               rv  = abs(dci-dc1(j))
+               if(rv<=rvmax) then
+                  if(diag_enabled/=0) nrv = nrv + 1_8
+                  jlib = idx1(j)
+                  qlo_j = qlo1(jlib)
+                  qhi_j = qhi1(jlib)
+                  if(qhi_i < qlo_j-pimax .or. qhi_j < qlo_i-pimax) then
+                     if(diag_enabled/=0) npi_supp = npi_supp + 1_8
+                     j = ll1(j)
+                     cycle
+                  endif
+                  ang2 = ((xi-x1(j))**2 + (y(i)-y1(j))**2 + (z(i)-z1(j))**2)
+                  if(ang2>0.0d0) then
+                     rp2_min = ang2*qlo_i*qlo_j
+                     rp2_max = ang2*qhi_i*qhi_j
+                     if(rp2_max>=rpmin2 .and. rp2_min<=rpmax2) then
+                        if(diag_enabled/=0) nprod = nprod + int(nq,8)*int(nq1,8)
+                        do qa=1,nq
+                           chi_i = qchi(qa,ilib)
+                           do qb=1,nq1
+                              chi_j = qchi1(qb,jlib)
+                              qpi = abs(chi_i-chi_j)
+                              if(qpi>=pimax) then
+                                 if(diag_enabled/=0) nqpi = nqpi + 1_8
+                                 cycle
+                              endif
+                              rp2 = chi_i*chi_j*ang2
+                              if(rp2<=rpmin2 .or. rp2>rpmax2) then
+                                 if(diag_enabled/=0) nqrp = nqrp + 1_8
+                                 cycle
+                              endif
+                              ibin = 0
+                              if(rp2>sepp2(nsepp)) then
+                                 ibin = nsepp
+                              else
+                                 do ii=nsepp-1,1,-1
+                                    if(rp2>sepp2(ii)) then
+                                       ibin = ii
+                                       exit
+                                    endif
+                                 enddo
+                              endif
+                              if(ibin<=0) then
+                                 if(diag_enabled/=0) nqrp = nqrp + 1_8
+                                 cycle
+                              endif
+                              ! Projected pi bins are built as linear edges starting at 0.
+                              ! Avoid an O(nsepv) scan inside the nq*nq1 loop.
+                              ip = int(qpi/dsepv) + 1
+                              if(ip>=1 .and. ip<=nsepv) then
+                                 cdpv(ip,ibin) = cdpv(ip,ibin) + wq
+                                 if(diag_enabled/=0) nacc = nacc + 1_8
+                              else
+                                 if(diag_enabled/=0) nqpi = nqpi + 1_8
+                              endif
+                           enddo
+                        enddo
+                     else
+                        if(diag_enabled/=0) nrp_supp = nrp_supp + 1_8
+                     endif
+                  else
+                     if(diag_enabled/=0) nang_zero = nang_zero + 1_8
+                  endif
+               else
+                  if(jq3>iq3) cycle lp_jq2
+               endif
+               j = ll1(j)
+            end do
+         end do lp_jq2
+      end do lp_jq1
+   end do lp_jq3
+end do
+!$omp end parallel do
+qdiag(1) = nscan
+qdiag(2) = nrv
+qdiag(3) = npi_supp
+qdiag(4) = nang_zero
+qdiag(5) = nrp_supp
+qdiag(6) = nprod
+qdiag(7) = nqpi
+qdiag(8) = nqrp
+qdiag(9) = nacc
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_C_qchi_wp
+
+
+
+subroutine rppi_C_qchi_wp_wg(nt,npt,ra,dec,dc,dcang,wei,x,y,z,nq,nlib,qchi,qlo,qhi,idx, &
+           npt1,dc1,dcang1,wei1,x1,y1,z1,nq1,nlib1,qchi1,qlo1,qhi1,idx1, &
+           nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,wfib,diag_enabled, &
+           cntid,logf,progressf,sk1,ll1,cdpv,qdiag)
+!===============================================================================
+! Weighted version of rppi_C_qchi_wp().  Supports quantile_chi cross counts
+! with input object weights and optional standard fiber-correction weights.
+implicit none
+integer       :: nt,nthr,npt,npt1,nsepp,nsepv,mxh1,mxh2,mxh3,nq,nlib,nq1,nlib1,wfib,diag_enabled
+real(kind=8)  :: ra(npt),dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=4)  :: wei(npt)
+real(kind=8)  :: dc1(npt1),dcang1(npt1),x1(npt1),y1(npt1),z1(npt1)
+real(kind=4)  :: wei1(npt1)
+real(kind=8)  :: qchi(nq,nlib),qlo(nlib),qhi(nlib),qchi1(nq1,nlib1),qlo1(nlib1),qhi1(nlib1)
+integer       :: idx(npt),idx1(npt1)
+real(kind=8)  :: sepp(nsepp+1),sepv(nsepv+1),sbound(6),cdpv(nsepv,nsepp)
+integer(kind=8) :: qdiag(9)
+integer       :: sk1(mxh3,mxh2,mxh1),ll1(npt1)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rpmin2,rvmax,rv,rvsearch,pimax,dsepv
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,dci,ang2,rp2,shth2
+real(kind=8)  :: qlo_i,qhi_i,qlo_j,qhi_j,rp2_min,rp2_max,chi_i,chi_j,qpi,wq,wpair,wi
+integer       :: nc1,nc2,nc3,fracp,dpart,nadv
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq2min,jq2max,jq2t,jq1m,jq2m,p1,p2
+integer       :: ilib,jlib,qa,qb,ip,ibin
+integer(kind=8) :: nscan,nrv,npi_supp,nang_zero,nrp_supp,nprod,nqpi,nqrp,nacc
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+fracp = 0 ; dpart = 0 ; nadv = 0
+cdpv   = 0.d0
+qdiag  = 0_8
+nscan = 0_8 ; nrv = 0_8 ; npi_supp = 0_8 ; nang_zero = 0_8
+nrp_supp = 0_8 ; nprod = 0_8 ; nqpi = 0_8 ; nqrp = 0_8 ; nacc = 0_8
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+rpmin2 = sepp2(1)
+rvmax  = rvsearch
+pimax  = sepv(nsepv+1)
+if(nsepv>0) then
+   dsepv = sepv(2)-sepv(1)
+else
+   dsepv = 1.0d0
+endif
+wq     = 1.0d0 / dble(nq*nq1)
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+dpart = int(float(max(1,npt))/float(max(1,mxh1)))
+if(dpart<1) dpart = 1
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cdpv,nscan,nrv,npi_supp,nang_zero,nrp_supp,nprod,nqpi,nqrp,nacc) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,dci,rv,ang2,rp2,ii,wi,shth2) &
+!$omp& private(ilib,jlib,qa,qb,ip,ibin,chi_i,chi_j,qpi,wpair) &
+!$omp& private(qlo_i,qhi_i,qlo_j,qhi_j,rp2_min,rp2_max) &
+!$omp& schedule(guided) firstprivate(fracp) if(nthr>1)
+
+do i=1,npt
+   xi  = x(i)
+   dci = dc(i)
+   wi = dble(wei(i))
+   ilib = idx(i)
+   qlo_i = qlo(ilib)
+   qhi_i = qhi(ilib)
+
+   iq1 = int((dec(i)-decl)/hc1)+1
+   iq2 = int((ra(i)-ral)/hc2)+1
+   iq3 = int((dci-dcoml)/hc3)+1
+
+   fracp = fracp + 1
+   if(fracp>=dpart) then
+       !$omp critical
+       nadv = nadv + 1
+       p1   = (nadv-1)*dpart + 1
+       p2   = nadv*dpart
+       if((nadv+1)*dpart>npt) p2=npt
+       call write_progress_range(cntid,nadv,mxh1,p1,p2,progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',p2,')'
+       fracp = 0
+       !$omp end critical
+   endif
+
+   lp_jq3: do jq3 = iq3-1,iq3+1
+      if(jq3<1.or.jq3>nc3) cycle lp_jq3
+      rcl    = (jq3-1)*hc3+dcoml
+      stm2   = sthmax2(rpmax,dcang(i),rcl)
+      dltdec = 2.0d0*asin(stm2)*rad2deg
+      jq1m   = int(dltdec/hc1)+1
+      lp_jq1: do jq1=iq1-jq1m,iq1+jq1m
+         if(jq1>nc1.or.jq1<1) cycle lp_jq1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2max = iq2+jq2m
+         jq2min = iq2-jq2m
+         if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+         lp_jq2: do jq2=jq2min,jq2max
+            if(jq2>nc2) then
+               jq2t = jq2-nc2
+            else if(jq2<1) then
+               jq2t = jq2+nc2
+            else
+               jq2t = jq2
+            end if
+            j = sk1(jq3,jq2t,jq1)
+            do while(j/=0)
+               if(diag_enabled/=0) nscan = nscan + 1_8
+               rv  = abs(dci-dc1(j))
+               if(rv<=rvmax) then
+                  if(diag_enabled/=0) nrv = nrv + 1_8
+                  jlib = idx1(j)
+                  qlo_j = qlo1(jlib)
+                  qhi_j = qhi1(jlib)
+                  if(qhi_i < qlo_j-pimax .or. qhi_j < qlo_i-pimax) then
+                     if(diag_enabled/=0) npi_supp = npi_supp + 1_8
+                     j = ll1(j)
+                     cycle
+                  endif
+                  ang2 = ((xi-x1(j))**2 + (y(i)-y1(j))**2 + (z(i)-z1(j))**2)
+                  if(ang2>0.0d0) then
+                     rp2_min = ang2*qlo_i*qlo_j
+                     rp2_max = ang2*qhi_i*qhi_j
+                     if(rp2_max>=rpmin2 .and. rp2_min<=rpmax2) then
+                        if(diag_enabled/=0) nprod = nprod + int(nq,8)*int(nq1,8)
+                        do qa=1,nq
+                           chi_i = qchi(qa,ilib)
+                           do qb=1,nq1
+                              chi_j = qchi1(qb,jlib)
+                              qpi = abs(chi_i-chi_j)
+                              if(qpi>=pimax) then
+                                 if(diag_enabled/=0) nqpi = nqpi + 1_8
+                                 cycle
+                              endif
+                              rp2 = chi_i*chi_j*ang2
+                              if(rp2<=rpmin2 .or. rp2>rpmax2) then
+                                 if(diag_enabled/=0) nqrp = nqrp + 1_8
+                                 cycle
+                              endif
+                              ibin = 0
+                              if(rp2>sepp2(nsepp)) then
+                                 ibin = nsepp
+                              else
+                                 do ii=nsepp-1,1,-1
+                                    if(rp2>sepp2(ii)) then
+                                       ibin = ii
+                                       exit
+                                    endif
+                                 enddo
+                              endif
+                              if(ibin<=0) then
+                                 if(diag_enabled/=0) nqrp = nqrp + 1_8
+                                 cycle
+                              endif
+                              ip = int(qpi/dsepv) + 1
+                              if(ip>=1 .and. ip<=nsepv) then
+                                 wpair = wq*wi*dble(wei1(j))
+                                 if(wfib==1) then
+                                    shth2 = rp2/(4.0d0*chi_i*chi_j)
+                                    wpair = wpair*wfiber(shth2)
+                                 endif
+                                 cdpv(ip,ibin) = cdpv(ip,ibin) + wpair
+                                 if(diag_enabled/=0) nacc = nacc + 1_8
+                              else
+                                 if(diag_enabled/=0) nqpi = nqpi + 1_8
+                              endif
+                           enddo
+                        enddo
+                     else
+                        if(diag_enabled/=0) nrp_supp = nrp_supp + 1_8
+                     endif
+                  else
+                     if(diag_enabled/=0) nang_zero = nang_zero + 1_8
+                  endif
+               else
+                  if(jq3>iq3) cycle lp_jq2
+               endif
+               j = ll1(j)
+            end do
+         end do lp_jq2
+      end do lp_jq1
+   end do lp_jq3
+end do
+!$omp end parallel do
+qdiag(1) = nscan
+qdiag(2) = nrv
+qdiag(3) = npi_supp
+qdiag(4) = nang_zero
+qdiag(5) = nrp_supp
+qdiag(6) = nprod
+qdiag(7) = nqpi
+qdiag(8) = nqrp
+qdiag(9) = nacc
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_C_qchi_wp_wg
+
+subroutine rppi_Cjk_qchi_wp(nt,npt,ra,dec,dc,dcang,x,y,z,nq,nlib,qchi,qlo,qhi,idx,reg, &
+           npt1,dc1,dcang1,x1,y1,z1,nq1,nlib1,qchi1,qlo1,qhi1,idx1,reg1, &
+           nreg,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3, &
+           cntid,logf,progressf,sk1,ll1,cdpv,touch)
+!===============================================================================
+! NAME
+!  rppi_Cjk_qchi_wp()
+!
+! DESCRIPTION
+!  Cross-count expected projected pairs when both samples carry equal-probability
+!  chi quantiles.  Keeps the existing 3D SK/LL pruning and support-prunes each
+!  candidate pair before the nq*nq1 Cartesian product.
+!
+implicit none
+integer       :: nt,nthr,npt,npt1,nsepp,nsepv,mxh1,mxh2,mxh3,nq,nlib,nq1,nlib1,nreg
+real(kind=8)  :: ra(npt),dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: dc1(npt1),dcang1(npt1),x1(npt1),y1(npt1),z1(npt1)
+real(kind=8)  :: qchi(nq,nlib),qlo(nlib),qhi(nlib),qchi1(nq1,nlib1),qlo1(nlib1),qhi1(nlib1)
+integer       :: idx(npt),idx1(npt1),reg(npt),reg1(npt1)
+real(kind=8)  :: sepp(nsepp+1),sepv(nsepv+1),sbound(6),cdpv(nsepv,nsepp),touch(nreg,nsepv,nsepp)
+integer       :: sk1(mxh3,mxh2,mxh1),ll1(npt1)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rpmin2,rvmax,rv,rvsearch,pimax,dsepv
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,dci,ang2,rp2
+real(kind=8)  :: qlo_i,qhi_i,qlo_j,qhi_j,rp2_min,rp2_max,chi_i,chi_j,qpi,wq
+integer       :: nc1,nc2,nc3,fracp,dpart,nadv
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq2min,jq2max,jq2t,jq1m,jq2m,p1,p2
+integer       :: ilib,jlib,qa,qb,ip,ibin,regi,regj
+integer(kind=8) :: nscan,nrv,npi_supp,nang_zero,nrp_supp,nprod,nqpi,nqrp,nacc
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+fracp = 0 ; dpart = 0 ; nadv = 0
+cdpv   = 0.d0
+touch  = 0.d0
+nscan = 0_8 ; nrv = 0_8 ; npi_supp = 0_8 ; nang_zero = 0_8
+nrp_supp = 0_8 ; nprod = 0_8 ; nqpi = 0_8 ; nqrp = 0_8 ; nacc = 0_8
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+rpmin2 = sepp2(1)
+rvmax  = rvsearch
+pimax  = sepv(nsepv+1)
+if(nsepv>0) then
+   dsepv = sepv(2)-sepv(1)
+else
+   dsepv = 1.0d0
+endif
+wq     = 1.0d0 / dble(nq*nq1)
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+dpart = int(float(max(1,npt))/float(max(1,mxh1)))
+if(dpart<1) dpart = 1
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cdpv,nscan,nrv,npi_supp,nang_zero,nrp_supp,nprod,nqpi,nqrp,nacc) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,dci,rv,ang2,rp2,ii) &
+!$omp& private(ilib,jlib,qa,qb,ip,ibin,chi_i,chi_j,qpi,regi,regj) &
+!$omp& private(qlo_i,qhi_i,qlo_j,qhi_j,rp2_min,rp2_max) &
+!$omp& schedule(guided) firstprivate(fracp) if(nthr>1)
+
+do i=1,npt
+   xi  = x(i)
+   dci = dc(i)
+   ilib = idx(i)
+   regi = reg(i) + 1
+   qlo_i = qlo(ilib)
+   qhi_i = qhi(ilib)
+
+   iq1 = int((dec(i)-decl)/hc1)+1
+   iq2 = int((ra(i)-ral)/hc2)+1
+   iq3 = int((dci-dcoml)/hc3)+1
+
+   fracp = fracp + 1
+   if(fracp>=dpart) then
+       !$omp critical
+       nadv = nadv + 1
+       p1   = (nadv-1)*dpart + 1
+       p2   = nadv*dpart
+       if((nadv+1)*dpart>npt) p2=npt
+       call write_progress_range(cntid,nadv,mxh1,p1,p2,progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',p2,')'
+       fracp = 0
+       !$omp end critical
+   endif
+
+   lp_jq3: do jq3 = iq3-1,iq3+1
+      if(jq3<1.or.jq3>nc3) cycle lp_jq3
+      rcl    = (jq3-1)*hc3+dcoml
+      stm2   = sthmax2(rpmax,dcang(i),rcl)
+      dltdec = 2.0d0*asin(stm2)*rad2deg
+      jq1m   = int(dltdec/hc1)+1
+      lp_jq1: do jq1=iq1-jq1m,iq1+jq1m
+         if(jq1>nc1.or.jq1<1) cycle lp_jq1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2max = iq2+jq2m
+         jq2min = iq2-jq2m
+         if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+         lp_jq2: do jq2=jq2min,jq2max
+            if(jq2>nc2) then
+               jq2t = jq2-nc2
+            else if(jq2<1) then
+               jq2t = jq2+nc2
+            else
+               jq2t = jq2
+            end if
+            j = sk1(jq3,jq2t,jq1)
+            do while(j/=0)
+               nscan = nscan + 1_8
+               rv  = abs(dci-dc1(j))
+               if(rv<=rvmax) then
+                  nrv = nrv + 1_8
+                  jlib = idx1(j)
+                  regj = reg1(j) + 1
+                  qlo_j = qlo1(jlib)
+                  qhi_j = qhi1(jlib)
+                  if(qhi_i < qlo_j-pimax .or. qhi_j < qlo_i-pimax) then
+                     npi_supp = npi_supp + 1_8
+                     j = ll1(j)
+                     cycle
+                  endif
+                  ang2 = ((xi-x1(j))**2 + (y(i)-y1(j))**2 + (z(i)-z1(j))**2)
+                  if(ang2>0.0d0) then
+                     rp2_min = ang2*qlo_i*qlo_j
+                     rp2_max = ang2*qhi_i*qhi_j
+                     if(rp2_max>=rpmin2 .and. rp2_min<=rpmax2) then
+                        nprod = nprod + int(nq,8)*int(nq1,8)
+                        do qa=1,nq
+                           chi_i = qchi(qa,ilib)
+                           do qb=1,nq1
+                              chi_j = qchi1(qb,jlib)
+                              qpi = abs(chi_i-chi_j)
+                              if(qpi>=pimax) then
+                                 nqpi = nqpi + 1_8
+                                 cycle
+                              endif
+                              rp2 = chi_i*chi_j*ang2
+                              if(rp2<=rpmin2 .or. rp2>rpmax2) then
+                                 nqrp = nqrp + 1_8
+                                 cycle
+                              endif
+                              ibin = 0
+                              if(rp2>sepp2(nsepp)) then
+                                 ibin = nsepp
+                              else
+                                 do ii=nsepp-1,1,-1
+                                    if(rp2>sepp2(ii)) then
+                                       ibin = ii
+                                       exit
+                                    endif
+                                 enddo
+                              endif
+                              if(ibin<=0) then
+                                 nqrp = nqrp + 1_8
+                                 cycle
+                              endif
+                              ! Projected pi bins are built as linear edges starting at 0.
+                              ! Avoid an O(nsepv) scan inside the nq*nq1 loop.
+                              ip = int(qpi/dsepv) + 1
+                              if(ip>=1 .and. ip<=nsepv) then
+                                 cdpv(ip,ibin) = cdpv(ip,ibin) + wq
+                                 touch(regi,ip,ibin) = touch(regi,ip,ibin) + wq
+                                 if(regj/=regi) then
+                                    touch(regj,ip,ibin) = touch(regj,ip,ibin) + wq
+                                 endif
+                                 nacc = nacc + 1_8
+                              else
+                                 nqpi = nqpi + 1_8
+                              endif
+                           enddo
+                        enddo
+                     else
+                        nrp_supp = nrp_supp + 1_8
+                     endif
+                  else
+                     nang_zero = nang_zero + 1_8
+                  endif
+               else
+                  if(jq3>iq3) cycle lp_jq2
+               endif
+               j = ll1(j)
+            end do
+         end do lp_jq2
+      end do lp_jq1
+   end do lp_jq3
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Cjk_qchi_wp
+
+subroutine rppi_Cb_qchi_wp(nt,npt,ra,dec,dc,dcang,x,y,z,nq,nlib,qchi,qlo,qhi,idx, &
+           npt1,dc1,dcang1,x1,y1,z1,nq1,nlib1,qchi1,qlo1,qhi1,idx1, &
+           nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,nbts,bseed, &
+           cntid,logf,progressf,sk1,ll1,cdpv,bcdpv)
+!===============================================================================
+! NAME
+!  rppi_Cb_qchi_wp()
+!
+! DESCRIPTION
+!  Cross-count expected projected pairs when both samples carry equal-probability
+!  chi quantiles.  Keeps the existing 3D SK/LL pruning and support-prunes each
+!  candidate pair before the nq*nq1 Cartesian product.
+!
+implicit none
+integer       :: nt,nthr,npt,npt1,nsepp,nsepv,mxh1,mxh2,mxh3,nq,nlib,nq1,nlib1,nbts,bseed
+real(kind=8)  :: ra(npt),dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: dc1(npt1),dcang1(npt1),x1(npt1),y1(npt1),z1(npt1)
+real(kind=8)  :: qchi(nq,nlib),qlo(nlib),qhi(nlib),qchi1(nq1,nlib1),qlo1(nlib1),qhi1(nlib1)
+integer       :: idx(npt),idx1(npt1)
+real(kind=8)  :: sepp(nsepp+1),sepv(nsepv+1),sbound(6),cdpv(nsepv,nsepp),bcdpv(nbts,nsepp,nsepv)
+real(kind=4)  :: wbts(nbts,npt),wbts1(nbts,npt1)
+integer       :: sk1(mxh3,mxh2,mxh1),ll1(npt1)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rpmin2,rvmax,rv,rvsearch,pimax,dsepv
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,dci,ang2,rp2
+real(kind=8)  :: qlo_i,qhi_i,qlo_j,qhi_j,rp2_min,rp2_max,chi_i,chi_j,qpi,wq,wpair
+integer       :: nc1,nc2,nc3,fracp,dpart,nadv
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq2min,jq2max,jq2t,jq1m,jq2m,p1,p2
+integer       :: ilib,jlib,qa,qb,ip,ibin
+integer(kind=8) :: nscan,nrv,npi_supp,nang_zero,nrp_supp,nprod,nqpi,nqrp,nacc
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+fracp = 0 ; dpart = 0 ; nadv = 0
+cdpv   = 0.d0
+bcdpv  = 0.0d0
+nscan = 0_8 ; nrv = 0_8 ; npi_supp = 0_8 ; nang_zero = 0_8
+nrp_supp = 0_8 ; nprod = 0_8 ; nqpi = 0_8 ; nqrp = 0_8 ; nacc = 0_8
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+rpmin2 = sepp2(1)
+rvmax  = rvsearch
+pimax  = sepv(nsepv+1)
+if(nsepv>0) then
+   dsepv = sepv(2)-sepv(1)
+else
+   dsepv = 1.0d0
+endif
+wq     = 1.0d0 / dble(nq*nq1)
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+call bootstrap(npt,nbts,bseed,wbts)
+call bootstrap(npt1,nbts,bseed,wbts1)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+dpart = int(float(max(1,npt))/float(max(1,mxh1)))
+if(dpart<1) dpart = 1
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cdpv,nscan,nrv,npi_supp,nang_zero,nrp_supp,nprod,nqpi,nqrp,nacc) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,dci,rv,ang2,rp2,ii) &
+!$omp& private(ilib,jlib,qa,qb,ip,ibin,chi_i,chi_j,qpi,wpair) &
+!$omp& private(qlo_i,qhi_i,qlo_j,qhi_j,rp2_min,rp2_max) &
+!$omp& schedule(guided) firstprivate(fracp) if(nthr>1)
+
+do i=1,npt
+   xi  = x(i)
+   dci = dc(i)
+   ilib = idx(i)
+   qlo_i = qlo(ilib)
+   qhi_i = qhi(ilib)
+
+   iq1 = int((dec(i)-decl)/hc1)+1
+   iq2 = int((ra(i)-ral)/hc2)+1
+   iq3 = int((dci-dcoml)/hc3)+1
+
+   fracp = fracp + 1
+   if(fracp>=dpart) then
+       !$omp critical
+       nadv = nadv + 1
+       p1   = (nadv-1)*dpart + 1
+       p2   = nadv*dpart
+       if((nadv+1)*dpart>npt) p2=npt
+       call write_progress_range(cntid,nadv,mxh1,p1,p2,progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',p2,')'
+       fracp = 0
+       !$omp end critical
+   endif
+
+   lp_jq3: do jq3 = iq3-1,iq3+1
+      if(jq3<1.or.jq3>nc3) cycle lp_jq3
+      rcl    = (jq3-1)*hc3+dcoml
+      stm2   = sthmax2(rpmax,dcang(i),rcl)
+      dltdec = 2.0d0*asin(stm2)*rad2deg
+      jq1m   = int(dltdec/hc1)+1
+      lp_jq1: do jq1=iq1-jq1m,iq1+jq1m
+         if(jq1>nc1.or.jq1<1) cycle lp_jq1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2max = iq2+jq2m
+         jq2min = iq2-jq2m
+         if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+         lp_jq2: do jq2=jq2min,jq2max
+            if(jq2>nc2) then
+               jq2t = jq2-nc2
+            else if(jq2<1) then
+               jq2t = jq2+nc2
+            else
+               jq2t = jq2
+            end if
+            j = sk1(jq3,jq2t,jq1)
+            do while(j/=0)
+               nscan = nscan + 1_8
+               rv  = abs(dci-dc1(j))
+               if(rv<=rvmax) then
+                  nrv = nrv + 1_8
+                  jlib = idx1(j)
+                  qlo_j = qlo1(jlib)
+                  qhi_j = qhi1(jlib)
+                  if(qhi_i < qlo_j-pimax .or. qhi_j < qlo_i-pimax) then
+                     npi_supp = npi_supp + 1_8
+                     j = ll1(j)
+                     cycle
+                  endif
+                  ang2 = ((xi-x1(j))**2 + (y(i)-y1(j))**2 + (z(i)-z1(j))**2)
+                  if(ang2>0.0d0) then
+                     rp2_min = ang2*qlo_i*qlo_j
+                     rp2_max = ang2*qhi_i*qhi_j
+                     if(rp2_max>=rpmin2 .and. rp2_min<=rpmax2) then
+                        nprod = nprod + int(nq,8)*int(nq1,8)
+                        do qa=1,nq
+                           chi_i = qchi(qa,ilib)
+                           do qb=1,nq1
+                              chi_j = qchi1(qb,jlib)
+                              qpi = abs(chi_i-chi_j)
+                              if(qpi>=pimax) then
+                                 nqpi = nqpi + 1_8
+                                 cycle
+                              endif
+                              rp2 = chi_i*chi_j*ang2
+                              if(rp2<=rpmin2 .or. rp2>rpmax2) then
+                                 nqrp = nqrp + 1_8
+                                 cycle
+                              endif
+                              ibin = 0
+                              if(rp2>sepp2(nsepp)) then
+                                 ibin = nsepp
+                              else
+                                 do ii=nsepp-1,1,-1
+                                    if(rp2>sepp2(ii)) then
+                                       ibin = ii
+                                       exit
+                                    endif
+                                 enddo
+                              endif
+                              if(ibin<=0) then
+                                 nqrp = nqrp + 1_8
+                                 cycle
+                              endif
+                              ! Projected pi bins are built as linear edges starting at 0.
+                              ! Avoid an O(nsepv) scan inside the nq*nq1 loop.
+                              ip = int(qpi/dsepv) + 1
+                              if(ip>=1 .and. ip<=nsepv) then
+                                 wpair = wq
+                                 cdpv(ip,ibin) = cdpv(ip,ibin) + wpair
+                                 bcdpv(:,ibin,ip) = bcdpv(:,ibin,ip) + wpair*wbts(:,i)*wbts1(:,j)
+                                 nacc = nacc + 1_8
+                              else
+                                 nqpi = nqpi + 1_8
+                              endif
+                           enddo
+                        enddo
+                     else
+                        nrp_supp = nrp_supp + 1_8
+                     endif
+                  else
+                     nang_zero = nang_zero + 1_8
+                  endif
+               else
+                  if(jq3>iq3) cycle lp_jq2
+               endif
+               j = ll1(j)
+            end do
+         end do lp_jq2
+      end do lp_jq1
+   end do lp_jq3
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Cb_qchi_wp
+
+
+subroutine rppi_C_gmm_wp_wg(nt,npt,ra,dec,dc,dcang,wei,x,y,z,kpdf,nlib,alpha,mu,sig,idx, &
+           npt1,dc1,dcang1,wei1,x1,y1,z1,kpdf1,nlib1,alpha1,mu1,sig1,idx1, &
+           nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,wfib, &
+           cntid,logf,progressf,sk1,ll1,cdpv)
+!===============================================================================
+! Weighted version of rppi_C_gmm_wp with optional fiber corrections.
+!
+implicit none
+integer       :: nt,nthr,npt,npt1,nsepp,nsepv,mxh1,mxh2,mxh3,kpdf,nlib,kpdf1,nlib1,wfib
+real(kind=8)  :: ra(npt),dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=4)  :: wei(npt)
+real(kind=8)  :: dc1(npt1),dcang1(npt1),x1(npt1),y1(npt1),z1(npt1)
+real(kind=4)  :: wei1(npt1)
+real(kind=8)  :: alpha(kpdf,nlib),mu(kpdf,nlib),sig(kpdf,nlib),alpha1(kpdf1,*),mu1(kpdf1,*),sig1(kpdf1,*)
+integer       :: idx(npt),idx1(npt1)
+real(kind=8)  :: sepp(nsepp+1),sepv(nsepv+1),sbound(6),cdpv(nsepv,nsepp)
+integer       :: sk1(mxh3,mxh2,mxh1),ll1(npt1)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rvmax,rv,rvsearch,probfloor
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,dci,ang2,rp2
+real(kind=8)  :: pimax,muD,sigD,ppi,wcomp,wpp,shth2
+integer       :: nc1,nc2,nc3,fracp,dpart,nadv
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq2min,jq2max,jq2t,jq1m,jq2m,p1,p2
+integer       :: ilib,jlib,kk,llc,ip,ibin
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+fracp = 0 ; dpart = 0 ; nadv = 0
+cdpv   = 0.d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+! Guard against nc3==0 when rvmax exceeds the distance span.
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+dpart = int(float(npt)/float(mxh1))
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cdpv) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,dci,rv,ang2,rp2,ii,wpp,shth2) &
+!$omp& private(ilib,jlib,kk,llc,ip,ibin,muD,sigD,ppi,wcomp) &
+!$omp& schedule(guided) firstprivate(fracp) if(nthr>1)
+
+do i=1,npt
+   xi  = x(i)
+   dci = dc(i)
+   ilib = idx(i)
+
+   iq1 = int((dec(i)-decl)/hc1)+1
+   iq2 = int((ra(i)-ral)/hc2)+1
+   iq3 = int((dci-dcoml)/hc3)+1
+
+   fracp = fracp + 1
+   if(fracp>=dpart) then
+       !$omp critical
+       nadv = nadv + 1
+       p1   = (nadv-1)*dpart + 1
+       p2   = nadv*dpart
+       if((nadv+1)*dpart>npt) p2=npt
+       call write_progress_range(cntid,nadv,mxh1,p1,p2,progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',p2,')'
+       fracp = 0
+       !$omp end critical
+   endif
+
+   lp_jq3: do jq3 = iq3-1,iq3+1
+      if(jq3<1.or.jq3>nc3) cycle lp_jq3
+      rcl    = (jq3-1)*hc3+dcoml
+      stm2   = sthmax2(rpmax,dcang(i),rcl)
+      dltdec = 2.0d0*asin(stm2)*rad2deg
+      jq1m   = int(dltdec/hc1)+1
+      lp_jq1: do jq1=iq1-jq1m,iq1+jq1m
+         if(jq1>nc1.or.jq1<1) cycle lp_jq1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2max = iq2+jq2m
+         jq2min = iq2-jq2m
+         if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+         lp_jq2: do jq2=jq2min,jq2max
+            if(jq2>nc2) then
+               jq2t = jq2-nc2
+            else if(jq2<1) then
+               jq2t = jq2+nc2
+            else
+               jq2t = jq2
+            end if
+            j = sk1(jq3,jq2t,jq1)
+            do while(j/=0)
+               rv  = abs(dci-dc1(j))
+               if(rv<=rvmax) then
+                  ang2 = ((xi-x1(j))**2 + (y(i)-y1(j))**2 + (z(i)-z1(j))**2)
+                  if(ang2>0.0d0) then
+                     jlib = idx1(j)
+                     wpp = wei(i)*wei1(j)
+                     if(wfib==1) then
+                        shth2 = ang2/4.0d0
+                        wpp = wpp*wfiber(shth2)
+                     endif
+                     do kk=1,kpdf
+                        do llc=1,kpdf1
+                           wcomp = alpha(kk,ilib)*alpha1(llc,jlib)
+                           if(wcomp<=probfloor) cycle
+                           rp2 = mu(kk,ilib)*mu1(llc,jlib)*ang2
+                           if(rp2>rpmax2) cycle
+
+                           muD = mu(kk,ilib) - mu1(llc,jlib)
+                           sigD = sqrt(sig(kk,ilib)*sig(kk,ilib) + sig1(llc,jlib)*sig1(llc,jlib))
+
+                           ibin = 0
+                           if(rp2>sepp2(nsepp)) then
+                              ibin = nsepp
+                           else
+                              do ii=nsepp-1,1,-1
+                                 if(rp2>sepp2(ii)) then
+                                    ibin = ii
+                                    exit
+                                 endif
+                              enddo
+                           endif
+                           if(ibin<=0) cycle
+
+                           do ip=1,nsepv
+                              ppi = gmm_abs_shell_prob(muD, sigD, sepv(ip), sepv(ip+1))
+                              if ((nsepv == 1 .and. ppi > probfloor) .or. &
+                                  (nsepv > 1 .and. ppi > 0.0d0)) then
+                                 cdpv(ip,ibin) = cdpv(ip,ibin) + wpp*wcomp*ppi
+                              endif
+                           enddo
+                        enddo
+                     enddo
+                  endif
+               else
+                  if(jq3>iq3) cycle lp_jq2
+               endif
+               j = ll1(j)
+            end do
+         end do lp_jq2
+      end do lp_jq1
+   end do lp_jq3
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_C_gmm_wp_wg
+
+
+
+subroutine rppi_C_grid_wp(nt,npt,ra,dec,dc,dcang,x,y,z,ngrid,nlib,grid,prob,lo,hi,idx, &
+           nact,act_idx,act_start,act_count,npt1,dc1,dcang1,x1,y1,z1,nlib1,cdf1,lo1,hi1,idx1, &
+           nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3, &
+           cntid,logf,progressf,sk1,ll1,cdpv)
+!===============================================================================
+! Exact common-grid PDF version of rppi_C_gmm_wp().
+implicit none
+integer       :: nt,nthr,npt,npt1,nsepp,nsepv,mxh1,mxh2,mxh3,ngrid,nlib,nlib1,nact
+real(kind=8)  :: ra(npt),dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: dc1(npt1),dcang1(npt1),x1(npt1),y1(npt1),z1(npt1)
+real(kind=8)  :: grid(ngrid),prob(ngrid,nlib),cdf1(ngrid,nlib1)
+integer       :: lo(nlib),hi(nlib),idx(npt),act_idx(nact),act_start(nlib),act_count(nlib)
+integer       :: lo1(nlib1),hi1(nlib1),idx1(npt1)
+real(kind=8)  :: sepp(nsepp+1),sepv(nsepv+1),sbound(6),cdpv(nsepv,nsepp)
+integer       :: sk1(mxh3,mxh2,mxh1),ll1(npt1)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: sepp2(nsepp+1),rpmin2,rpmax,rpmax2,rvmax,rv,rvsearch,pimax
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,dci,ang2
+real(kind=8)  :: chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair
+integer       :: nc1,nc2,nc3,fracp,dpart,nadv
+integer       :: i,j,iq1,iq2,iq3,jq1,jq2,jq3,jq2min,jq2max,jq2t,jq1m,jq2m,p1,p2
+integer       :: ilib,jlib
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+fracp = 0 ; dpart = 0 ; nadv = 0
+cdpv   = 0.d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmin2 = sepp2(1)
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(nsepv+1)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+dpart = int(float(npt)/float(mxh1))
+if(dpart<1) dpart = 1
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cdpv) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,dci,rv,ang2,p1,p2) &
+!$omp& private(ilib,jlib,chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair) &
+!$omp& schedule(guided) firstprivate(fracp) if(nthr>1)
+
+do i=1,npt
+   xi  = x(i)
+   dci = dc(i)
+   ilib = idx(i)
+   chi_lo_i = grid(lo(ilib))
+   chi_hi_i = grid(hi(ilib))
+
+   iq1 = int((dec(i)-decl)/hc1)+1
+   iq2 = int((ra(i)-ral)/hc2)+1
+   iq3 = int((dci-dcoml)/hc3)+1
+
+   fracp = fracp + 1
+   if(fracp>=dpart) then
+       !$omp critical
+       nadv = nadv + 1
+       p1   = (nadv-1)*dpart + 1
+       p2   = nadv*dpart
+       if((nadv+1)*dpart>npt) p2=npt
+       call write_progress_range(cntid,nadv,mxh1,p1,p2,progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',p2,')'
+       fracp = 0
+       !$omp end critical
+   endif
+
+   lp_jq3: do jq3 = iq3-1,iq3+1
+      if(jq3<1.or.jq3>nc3) cycle lp_jq3
+      rcl    = (jq3-1)*hc3+dcoml
+      stm2   = sthmax2(rpmax,dcang(i),rcl)
+      dltdec = 2.0d0*asin(stm2)*rad2deg
+      jq1m   = int(dltdec/hc1)+1
+      lp_jq1: do jq1=iq1-jq1m,iq1+jq1m
+         if(jq1>nc1.or.jq1<1) cycle lp_jq1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2max = iq2+jq2m
+         jq2min = iq2-jq2m
+         if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+         lp_jq2: do jq2=jq2min,jq2max
+            if(jq2>nc2) then
+               jq2t = jq2-nc2
+            else if(jq2<1) then
+               jq2t = jq2+nc2
+            else
+               jq2t = jq2
+            end if
+            j = sk1(jq3,jq2t,jq1)
+            do while(j/=0)
+               rv  = abs(dci-dc1(j))
+               if(rv<=rvmax) then
+                  jlib = idx1(j)
+                  chi_lo_j = grid(lo1(jlib))
+                  chi_hi_j = grid(hi1(jlib))
+                  if(chi_hi_i < chi_lo_j - pimax .or. chi_hi_j < chi_lo_i - pimax) then
+                     j = ll1(j)
+                     cycle
+                  endif
+                  ang2 = ((xi-x1(j))**2 + (y(i)-y1(j))**2 + (z(i)-z1(j))**2)
+                  if(ang2>0.0d0) then
+                     rp2min_pair = ang2 * (chi_lo_i * chi_lo_j)
+                     rp2max_pair = ang2 * (chi_hi_i * chi_hi_j)
+                     if(rp2min_pair<=rpmax2 .and. rp2max_pair>=rpmin2) then
+                        call accum_exact_grid_pair_sparse(nsepp,sepp2,nsepv,sepv,ang2,grid,prob(:,ilib),cdf1(:,jlib), &
+                             act_idx,act_start(ilib),act_count(ilib),lo1(jlib),hi1(jlib),1.0d0,cdpv)
+                     endif
+                  endif
+               else
+                  if(jq3>iq3) cycle lp_jq2
+               endif
+               j = ll1(j)
+            end do
+         end do lp_jq2
+      end do lp_jq1
+   end do lp_jq3
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_C_grid_wp
+
+
+subroutine rppi_C_grid_wp_wg(nt,npt,ra,dec,dc,dcang,wei,x,y,z,ngrid,nlib,grid,prob,lo,hi,idx, &
+           nact,act_idx,act_start,act_count,npt1,dc1,dcang1,wei1,x1,y1,z1,nlib1,cdf1,lo1,hi1,idx1, &
+           nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,wfib, &
+           cntid,logf,progressf,sk1,ll1,cdpv)
+!===============================================================================
+! Weighted exact common-grid PDF version of rppi_C_grid_wp().
+implicit none
+integer       :: nt,nthr,npt,npt1,nsepp,nsepv,mxh1,mxh2,mxh3,ngrid,nlib,nlib1,nact,wfib
+real(kind=8)  :: ra(npt),dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=4)  :: wei(npt)
+real(kind=8)  :: dc1(npt1),dcang1(npt1),x1(npt1),y1(npt1),z1(npt1)
+real(kind=4)  :: wei1(npt1)
+real(kind=8)  :: grid(ngrid),prob(ngrid,nlib),cdf1(ngrid,nlib1)
+integer       :: lo(nlib),hi(nlib),idx(npt),act_idx(nact),act_start(nlib),act_count(nlib)
+integer       :: lo1(nlib1),hi1(nlib1),idx1(npt1)
+real(kind=8)  :: sepp(nsepp+1),sepv(nsepv+1),sbound(6),cdpv(nsepv,nsepp)
+integer       :: sk1(mxh3,mxh2,mxh1),ll1(npt1)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: sepp2(nsepp+1),rpmin2,rpmax,rpmax2,rvmax,rv,rvsearch,pimax
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,dci,ang2,wpair,shth2
+real(kind=8)  :: chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair
+integer       :: nc1,nc2,nc3,fracp,dpart,nadv
+integer       :: i,j,iq1,iq2,iq3,jq1,jq2,jq3,jq2min,jq2max,jq2t,jq1m,jq2m,p1,p2
+integer       :: ilib,jlib
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+fracp = 0 ; dpart = 0 ; nadv = 0
+cdpv   = 0.d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmin2 = sepp2(1)
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(nsepv+1)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+dpart = int(float(npt)/float(mxh1))
+if(dpart<1) dpart = 1
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cdpv) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,dci,rv,ang2,wpair,shth2,p1,p2) &
+!$omp& private(ilib,jlib,chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair) &
+!$omp& schedule(guided) firstprivate(fracp) if(nthr>1)
+
+do i=1,npt
+   xi  = x(i)
+   dci = dc(i)
+   ilib = idx(i)
+   chi_lo_i = grid(lo(ilib))
+   chi_hi_i = grid(hi(ilib))
+
+   iq1 = int((dec(i)-decl)/hc1)+1
+   iq2 = int((ra(i)-ral)/hc2)+1
+   iq3 = int((dci-dcoml)/hc3)+1
+
+   fracp = fracp + 1
+   if(fracp>=dpart) then
+       !$omp critical
+       nadv = nadv + 1
+       p1   = (nadv-1)*dpart + 1
+       p2   = nadv*dpart
+       if((nadv+1)*dpart>npt) p2=npt
+       call write_progress_range(cntid,nadv,mxh1,p1,p2,progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',p2,')'
+       fracp = 0
+       !$omp end critical
+   endif
+
+   lp_jq3: do jq3 = iq3-1,iq3+1
+      if(jq3<1.or.jq3>nc3) cycle lp_jq3
+      rcl    = (jq3-1)*hc3+dcoml
+      stm2   = sthmax2(rpmax,dcang(i),rcl)
+      dltdec = 2.0d0*asin(stm2)*rad2deg
+      jq1m   = int(dltdec/hc1)+1
+      lp_jq1: do jq1=iq1-jq1m,iq1+jq1m
+         if(jq1>nc1.or.jq1<1) cycle lp_jq1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2max = iq2+jq2m
+         jq2min = iq2-jq2m
+         if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+         lp_jq2: do jq2=jq2min,jq2max
+            if(jq2>nc2) then
+               jq2t = jq2-nc2
+            else if(jq2<1) then
+               jq2t = jq2+nc2
+            else
+               jq2t = jq2
+            end if
+            j = sk1(jq3,jq2t,jq1)
+            do while(j/=0)
+               rv  = abs(dci-dc1(j))
+               if(rv<=rvmax) then
+                  jlib = idx1(j)
+                  chi_lo_j = grid(lo1(jlib))
+                  chi_hi_j = grid(hi1(jlib))
+                  if(chi_hi_i < chi_lo_j - pimax .or. chi_hi_j < chi_lo_i - pimax) then
+                     j = ll1(j)
+                     cycle
+                  endif
+                  ang2 = ((xi-x1(j))**2 + (y(i)-y1(j))**2 + (z(i)-z1(j))**2)
+                  if(ang2>0.0d0) then
+                     rp2min_pair = ang2 * (chi_lo_i * chi_lo_j)
+                     rp2max_pair = ang2 * (chi_hi_i * chi_hi_j)
+                     if(rp2min_pair<=rpmax2 .and. rp2max_pair>=rpmin2) then
+                        wpair = wei(i)*wei1(j)
+                        if(wfib==1) then
+                           shth2 = ang2/4.0d0
+                           wpair = wpair*wfiber(shth2)
+                        endif
+                        call accum_exact_grid_pair_sparse(nsepp,sepp2,nsepv,sepv,ang2,grid,prob(:,ilib),cdf1(:,jlib), &
+                             act_idx,act_start(ilib),act_count(ilib),lo1(jlib),hi1(jlib),wpair,cdpv)
+                     endif
+                  endif
+               else
+                  if(jq3>iq3) cycle lp_jq2
+               endif
+               j = ll1(j)
+            end do
+         end do lp_jq2
+      end do lp_jq1
+   end do lp_jq3
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_C_grid_wp_wg
+
+
+subroutine rppi_Cb_grid_wp(nt,npt,ra,dec,dc,dcang,x,y,z,ngrid,nlib,grid,prob,lo,hi,idx, &
+           nact,act_idx,act_start,act_count,npt1,dc1,dcang1,x1,y1,z1,nlib1,cdf1,lo1,hi1,idx1, &
+           nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,nbts,bseed, &
+           cntid,logf,progressf,sk1,ll1,cdpv,bcdpv)
+!===============================================================================
+! Bootstrap exact common-grid PDF version of rppi_C_grid_wp().
+implicit none
+integer       :: nt,nthr,npt,npt1,nsepp,nsepv,mxh1,mxh2,mxh3,ngrid,nlib,nlib1,nact,nbts,bseed
+real(kind=8)  :: ra(npt),dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: dc1(npt1),dcang1(npt1),x1(npt1),y1(npt1),z1(npt1)
+real(kind=8)  :: grid(ngrid),prob(ngrid,nlib),cdf1(ngrid,nlib1)
+integer       :: lo(nlib),hi(nlib),idx(npt),act_idx(nact),act_start(nlib),act_count(nlib)
+integer       :: lo1(nlib1),hi1(nlib1),idx1(npt1)
+real(kind=8)  :: sepp(nsepp+1),sepv(nsepv+1),sbound(6),cdpv(nsepv,nsepp),bcdpv(nbts,nsepp,nsepv)
+real(kind=4)  :: wbts(nbts,npt),wbts1(nbts,npt1)
+integer       :: sk1(mxh3,mxh2,mxh1),ll1(npt1)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: sepp2(nsepp+1),rpmin2,rpmax,rpmax2,rvmax,rv,rvsearch,pimax
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,dci,ang2
+real(kind=8)  :: chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair
+integer       :: nc1,nc2,nc3,fracp,dpart,nadv
+integer       :: i,j,iq1,iq2,iq3,jq1,jq2,jq3,jq2min,jq2max,jq2t,jq1m,jq2m,p1,p2
+integer       :: ilib,jlib
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+fracp = 0 ; dpart = 0 ; nadv = 0
+cdpv   = 0.d0
+bcdpv  = 0.d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmin2 = sepp2(1)
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(nsepv+1)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+call bootstrap(npt,nbts,bseed,wbts)
+call bootstrap(npt1,nbts,bseed,wbts1)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+dpart = int(float(npt)/float(mxh1))
+if(dpart<1) dpart = 1
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cdpv,bcdpv) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,dci,rv,ang2,p1,p2) &
+!$omp& private(ilib,jlib,chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair) &
+!$omp& schedule(guided) firstprivate(fracp) if(nthr>1)
+do i=1,npt
+   xi  = x(i)
+   dci = dc(i)
+   ilib = idx(i)
+   chi_lo_i = grid(lo(ilib))
+   chi_hi_i = grid(hi(ilib))
+
+   iq1 = int((dec(i)-decl)/hc1)+1
+   iq2 = int((ra(i)-ral)/hc2)+1
+   iq3 = int((dci-dcoml)/hc3)+1
+
+   fracp = fracp + 1
+   if(fracp>=dpart) then
+       !$omp critical
+       nadv = nadv + 1
+       p1   = (nadv-1)*dpart + 1
+       p2   = nadv*dpart
+       if((nadv+1)*dpart>npt) p2=npt
+       call write_progress_range(cntid,nadv,mxh1,p1,p2,progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',p2,')'
+       fracp = 0
+       !$omp end critical
+   endif
+
+   lp_jq3: do jq3 = iq3-1,iq3+1
+      if(jq3<1.or.jq3>nc3) cycle lp_jq3
+      rcl    = (jq3-1)*hc3+dcoml
+      stm2   = sthmax2(rpmax,dcang(i),rcl)
+      dltdec = 2.0d0*asin(stm2)*rad2deg
+      jq1m   = int(dltdec/hc1)+1
+      lp_jq1: do jq1=iq1-jq1m,iq1+jq1m
+         if(jq1>nc1.or.jq1<1) cycle lp_jq1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2max = iq2+jq2m
+         jq2min = iq2-jq2m
+         if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+         lp_jq2: do jq2=jq2min,jq2max
+            if(jq2>nc2) then
+               jq2t = jq2-nc2
+            else if(jq2<1) then
+               jq2t = jq2+nc2
+            else
+               jq2t = jq2
+            end if
+            j = sk1(jq3,jq2t,jq1)
+            do while(j/=0)
+               rv  = abs(dci-dc1(j))
+               if(rv<=rvmax) then
+                  jlib = idx1(j)
+                  chi_lo_j = grid(lo1(jlib))
+                  chi_hi_j = grid(hi1(jlib))
+                  if(chi_hi_i < chi_lo_j - pimax .or. chi_hi_j < chi_lo_i - pimax) then
+                     j = ll1(j)
+                     cycle
+                  endif
+                  ang2 = ((xi-x1(j))**2 + (y(i)-y1(j))**2 + (z(i)-z1(j))**2)
+                  if(ang2>0.0d0) then
+                     rp2min_pair = ang2 * (chi_lo_i * chi_lo_j)
+                     rp2max_pair = ang2 * (chi_hi_i * chi_hi_j)
+                     if(rp2min_pair<=rpmax2 .and. rp2max_pair>=rpmin2) then
+                        call accum_exact_grid_pair_sparse_boot(nsepp,sepp2,nsepv,sepv,ang2,grid, &
+                             prob(:,ilib),cdf1(:,jlib),act_idx,act_start(ilib),act_count(ilib), &
+                             lo1(jlib),hi1(jlib),1.0d0,nbts,wbts(:,i),wbts1(:,j),cdpv,bcdpv)
+                     endif
+                  endif
+               else
+                  if(jq3>iq3) cycle lp_jq2
+               endif
+               j = ll1(j)
+            end do
+         end do lp_jq2
+      end do lp_jq1
+   end do lp_jq3
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Cb_grid_wp
+
+
+subroutine rppi_Cb_grid_wp_wg(nt,npt,ra,dec,dc,dcang,wei,x,y,z,ngrid,nlib,grid,prob,lo,hi,idx, &
+           nact,act_idx,act_start,act_count,npt1,dc1,dcang1,wei1,x1,y1,z1,nlib1,cdf1,lo1,hi1,idx1, &
+           nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,nbts,bseed,wfib, &
+           cntid,logf,progressf,sk1,ll1,cdpv,bcdpv)
+!===============================================================================
+! Weighted bootstrap exact common-grid PDF version of rppi_C_grid_wp().
+implicit none
+integer       :: nt,nthr,npt,npt1,nsepp,nsepv,mxh1,mxh2,mxh3,ngrid,nlib,nlib1,nact,nbts,bseed,wfib
+real(kind=8)  :: ra(npt),dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=4)  :: wei(npt)
+real(kind=8)  :: dc1(npt1),dcang1(npt1),x1(npt1),y1(npt1),z1(npt1)
+real(kind=4)  :: wei1(npt1)
+real(kind=8)  :: grid(ngrid),prob(ngrid,nlib),cdf1(ngrid,nlib1)
+integer       :: lo(nlib),hi(nlib),idx(npt),act_idx(nact),act_start(nlib),act_count(nlib)
+integer       :: lo1(nlib1),hi1(nlib1),idx1(npt1)
+real(kind=8)  :: sepp(nsepp+1),sepv(nsepv+1),sbound(6),cdpv(nsepv,nsepp),bcdpv(nbts,nsepp,nsepv)
+real(kind=4)  :: wbts(nbts,npt),wbts1(nbts,npt1)
+integer       :: sk1(mxh3,mxh2,mxh1),ll1(npt1)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: sepp2(nsepp+1),rpmin2,rpmax,rpmax2,rvmax,rv,rvsearch,pimax,wpair,shth2
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,dci,ang2
+real(kind=8)  :: chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair
+integer       :: nc1,nc2,nc3,fracp,dpart,nadv
+integer       :: i,j,iq1,iq2,iq3,jq1,jq2,jq3,jq2min,jq2max,jq2t,jq1m,jq2m,p1,p2
+integer       :: ilib,jlib
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+fracp = 0 ; dpart = 0 ; nadv = 0
+cdpv   = 0.d0
+bcdpv  = 0.d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmin2 = sepp2(1)
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(nsepv+1)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+call bootstrap(npt,nbts,bseed,wbts)
+call bootstrap(npt1,nbts,bseed,wbts1)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+dpart = int(float(npt)/float(mxh1))
+if(dpart<1) dpart = 1
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cdpv,bcdpv) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,dci,rv,ang2,p1,p2,wpair,shth2) &
+!$omp& private(ilib,jlib,chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair) &
+!$omp& schedule(guided) firstprivate(fracp) if(nthr>1)
+do i=1,npt
+   xi  = x(i)
+   dci = dc(i)
+   ilib = idx(i)
+   chi_lo_i = grid(lo(ilib))
+   chi_hi_i = grid(hi(ilib))
+
+   iq1 = int((dec(i)-decl)/hc1)+1
+   iq2 = int((ra(i)-ral)/hc2)+1
+   iq3 = int((dci-dcoml)/hc3)+1
+
+   fracp = fracp + 1
+   if(fracp>=dpart) then
+       !$omp critical
+       nadv = nadv + 1
+       p1   = (nadv-1)*dpart + 1
+       p2   = nadv*dpart
+       if((nadv+1)*dpart>npt) p2=npt
+       call write_progress_range(cntid,nadv,mxh1,p1,p2,progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',p2,')'
+       fracp = 0
+       !$omp end critical
+   endif
+
+   lp_jq3: do jq3 = iq3-1,iq3+1
+      if(jq3<1.or.jq3>nc3) cycle lp_jq3
+      rcl    = (jq3-1)*hc3+dcoml
+      stm2   = sthmax2(rpmax,dcang(i),rcl)
+      dltdec = 2.0d0*asin(stm2)*rad2deg
+      jq1m   = int(dltdec/hc1)+1
+      lp_jq1: do jq1=iq1-jq1m,iq1+jq1m
+         if(jq1>nc1.or.jq1<1) cycle lp_jq1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2max = iq2+jq2m
+         jq2min = iq2-jq2m
+         if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+         lp_jq2: do jq2=jq2min,jq2max
+            if(jq2>nc2) then
+               jq2t = jq2-nc2
+            else if(jq2<1) then
+               jq2t = jq2+nc2
+            else
+               jq2t = jq2
+            end if
+            j = sk1(jq3,jq2t,jq1)
+            do while(j/=0)
+               rv  = abs(dci-dc1(j))
+               if(rv<=rvmax) then
+                  jlib = idx1(j)
+                  chi_lo_j = grid(lo1(jlib))
+                  chi_hi_j = grid(hi1(jlib))
+                  if(chi_hi_i < chi_lo_j - pimax .or. chi_hi_j < chi_lo_i - pimax) then
+                     j = ll1(j)
+                     cycle
+                  endif
+                  ang2 = ((xi-x1(j))**2 + (y(i)-y1(j))**2 + (z(i)-z1(j))**2)
+                  if(ang2>0.0d0) then
+                     rp2min_pair = ang2 * (chi_lo_i * chi_lo_j)
+                     rp2max_pair = ang2 * (chi_hi_i * chi_hi_j)
+                     if(rp2min_pair<=rpmax2 .and. rp2max_pair>=rpmin2) then
+                        wpair = dble(wei(i))*dble(wei1(j))
+                        if(wfib==1) then
+                           shth2 = ang2/4.0d0
+                           wpair = wpair*wfiber(shth2)
+                        endif
+                        call accum_exact_grid_pair_sparse_boot(nsepp,sepp2,nsepv,sepv,ang2,grid, &
+                             prob(:,ilib),cdf1(:,jlib),act_idx,act_start(ilib),act_count(ilib), &
+                             lo1(jlib),hi1(jlib),wpair,nbts,wbts(:,i),wbts1(:,j),cdpv,bcdpv)
+                     endif
+                  endif
+               else
+                  if(jq3>iq3) cycle lp_jq2
+               endif
+               j = ll1(j)
+            end do
+         end do lp_jq2
+      end do lp_jq1
+   end do lp_jq3
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Cb_grid_wp_wg
+
+
+
+
+subroutine rppi_Cjk_grid_wp(nt,npt,ra,dec,dc,dcang,x,y,z,ngrid,nlib,grid,prob,lo,hi,idx, &
+           nact,act_idx,act_start,act_count,reg,npt1,dc1,dcang1,x1,y1,z1,nlib1,cdf1,lo1,hi1,idx1,reg1, &
+           nreg,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3, &
+           cntid,logf,progressf,sk1,ll1,cdpv,touch)
+!===============================================================================
+! Jackknife-touch exact common-grid PDF version of rppi_C_grid_wp().
+implicit none
+integer       :: nt,nthr,npt,npt1,nsepp,nsepv,mxh1,mxh2,mxh3,ngrid,nlib,nlib1,nact,nreg
+real(kind=8)  :: ra(npt),dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: dc1(npt1),dcang1(npt1),x1(npt1),y1(npt1),z1(npt1)
+real(kind=8)  :: grid(ngrid),prob(ngrid,nlib),cdf1(ngrid,nlib1)
+integer       :: lo(nlib),hi(nlib),idx(npt),act_idx(nact),act_start(nlib),act_count(nlib),reg(npt)
+integer       :: lo1(nlib1),hi1(nlib1),idx1(npt1),reg1(npt1)
+real(kind=8)  :: sepp(nsepp+1),sepv(nsepv+1),sbound(6),cdpv(nsepv,nsepp),touch(nreg,nsepv,nsepp)
+integer       :: sk1(mxh3,mxh2,mxh1),ll1(npt1)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: sepp2(nsepp+1),rpmin2,rpmax,rpmax2,rvmax,rv,rvsearch,pimax
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,dci,ang2
+real(kind=8)  :: chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair
+integer       :: nc1,nc2,nc3,fracp,dpart,nadv
+integer       :: i,j,iq1,iq2,iq3,jq1,jq2,jq3,jq2min,jq2max,jq2t,jq1m,jq2m,p1,p2
+integer       :: ilib,jlib,regi,regj
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+fracp = 0 ; dpart = 0 ; nadv = 0
+cdpv   = 0.d0
+touch  = 0.d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmin2 = sepp2(1)
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(nsepv+1)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+dpart = int(float(npt)/float(mxh1))
+if(dpart<1) dpart = 1
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cdpv,touch) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,dci,rv,ang2,p1,p2) &
+!$omp& private(ilib,jlib,regi,regj,chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair) &
+!$omp& schedule(guided) firstprivate(fracp) if(nthr>1)
+do i=1,npt
+   xi  = x(i)
+   dci = dc(i)
+   ilib = idx(i)
+   regi = reg(i) + 1
+   chi_lo_i = grid(lo(ilib))
+   chi_hi_i = grid(hi(ilib))
+
+   iq1 = int((dec(i)-decl)/hc1)+1
+   iq2 = int((ra(i)-ral)/hc2)+1
+   iq3 = int((dci-dcoml)/hc3)+1
+
+   fracp = fracp + 1
+   if(fracp>=dpart) then
+       !$omp critical
+       nadv = nadv + 1
+       p1   = (nadv-1)*dpart + 1
+       p2   = nadv*dpart
+       if((nadv+1)*dpart>npt) p2=npt
+       call write_progress_range(cntid,nadv,mxh1,p1,p2,progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',p2,')'
+       fracp = 0
+       !$omp end critical
+   endif
+
+   lp_jq3: do jq3 = iq3-1,iq3+1
+      if(jq3<1.or.jq3>nc3) cycle lp_jq3
+      rcl    = (jq3-1)*hc3+dcoml
+      stm2   = sthmax2(rpmax,dcang(i),rcl)
+      dltdec = 2.0d0*asin(stm2)*rad2deg
+      jq1m   = int(dltdec/hc1)+1
+      lp_jq1: do jq1=iq1-jq1m,iq1+jq1m
+         if(jq1>nc1.or.jq1<1) cycle lp_jq1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2max = iq2+jq2m
+         jq2min = iq2-jq2m
+         if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+         lp_jq2: do jq2=jq2min,jq2max
+            if(jq2>nc2) then
+               jq2t = jq2-nc2
+            else if(jq2<1) then
+               jq2t = jq2+nc2
+            else
+               jq2t = jq2
+            end if
+            j = sk1(jq3,jq2t,jq1)
+            do while(j/=0)
+               rv  = abs(dci-dc1(j))
+               if(rv<=rvmax) then
+                  jlib = idx1(j)
+                  regj = reg1(j) + 1
+                  chi_lo_j = grid(lo1(jlib))
+                  chi_hi_j = grid(hi1(jlib))
+                  if(chi_hi_i < chi_lo_j - pimax .or. chi_hi_j < chi_lo_i - pimax) then
+                     j = ll1(j)
+                     cycle
+                  endif
+                  ang2 = ((xi-x1(j))**2 + (y(i)-y1(j))**2 + (z(i)-z1(j))**2)
+                  if(ang2>0.0d0) then
+                     rp2min_pair = ang2 * (chi_lo_i * chi_lo_j)
+                     rp2max_pair = ang2 * (chi_hi_i * chi_hi_j)
+                     if(rp2min_pair<=rpmax2 .and. rp2max_pair>=rpmin2) then
+                        call accum_exact_grid_pair_sparse_touch(nsepp,sepp2,nsepv,sepv,ang2,grid,prob(:,ilib), &
+                             cdf1(:,jlib),act_idx,act_start(ilib),act_count(ilib),lo1(jlib),hi1(jlib), &
+                             1.0d0,nreg,regi,regj,cdpv,touch)
+                     endif
+                  endif
+               else
+                  if(jq3>iq3) cycle lp_jq2
+               endif
+               j = ll1(j)
+            end do
+         end do lp_jq2
+      end do lp_jq1
+   end do lp_jq3
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Cjk_grid_wp
+
+
+subroutine rppi_Cjk_grid_wp_wg(nt,npt,ra,dec,dc,dcang,wei,x,y,z,ngrid,nlib,grid,prob,lo,hi,idx, &
+           nact,act_idx,act_start,act_count,reg,npt1,dc1,dcang1,wei1,x1,y1,z1,nlib1,cdf1,lo1,hi1,idx1,reg1, &
+           nreg,nsepp,sepp,nsepv,sepv,rvsearch,sbound,mxh1,mxh2,mxh3,wfib, &
+           cntid,logf,progressf,sk1,ll1,cdpv,touch)
+!===============================================================================
+! Weighted jackknife-touch exact common-grid PDF version of rppi_C_grid_wp().
+implicit none
+integer       :: nt,nthr,npt,npt1,nsepp,nsepv,mxh1,mxh2,mxh3,ngrid,nlib,nlib1,nact,wfib,nreg
+real(kind=8)  :: ra(npt),dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=4)  :: wei(npt)
+real(kind=8)  :: dc1(npt1),dcang1(npt1),x1(npt1),y1(npt1),z1(npt1)
+real(kind=4)  :: wei1(npt1)
+real(kind=8)  :: grid(ngrid),prob(ngrid,nlib),cdf1(ngrid,nlib1)
+integer       :: lo(nlib),hi(nlib),idx(npt),act_idx(nact),act_start(nlib),act_count(nlib),reg(npt)
+integer       :: lo1(nlib1),hi1(nlib1),idx1(npt1),reg1(npt1)
+real(kind=8)  :: sepp(nsepp+1),sepv(nsepv+1),sbound(6),cdpv(nsepv,nsepp),touch(nreg,nsepv,nsepp)
+integer       :: sk1(mxh3,mxh2,mxh1),ll1(npt1)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: sepp2(nsepp+1),rpmin2,rpmax,rpmax2,rvmax,rv,rvsearch,pimax
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,dci,ang2,wpair,shth2
+real(kind=8)  :: chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair
+integer       :: nc1,nc2,nc3,fracp,dpart,nadv
+integer       :: i,j,iq1,iq2,iq3,jq1,jq2,jq3,jq2min,jq2max,jq2t,jq1m,jq2m,p1,p2
+integer       :: ilib,jlib,regi,regj
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+fracp = 0 ; dpart = 0 ; nadv = 0
+cdpv   = 0.d0
+touch  = 0.d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmin2 = sepp2(1)
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(nsepv+1)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+dpart = int(float(npt)/float(mxh1))
+if(dpart<1) dpart = 1
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cdpv,touch) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,dci,rv,ang2,wpair,shth2,p1,p2) &
+!$omp& private(ilib,jlib,regi,regj,chi_lo_i,chi_hi_i,chi_lo_j,chi_hi_j,rp2min_pair,rp2max_pair) &
+!$omp& schedule(guided) firstprivate(fracp) if(nthr>1)
+do i=1,npt
+   xi  = x(i)
+   dci = dc(i)
+   ilib = idx(i)
+   regi = reg(i) + 1
+   chi_lo_i = grid(lo(ilib))
+   chi_hi_i = grid(hi(ilib))
+
+   iq1 = int((dec(i)-decl)/hc1)+1
+   iq2 = int((ra(i)-ral)/hc2)+1
+   iq3 = int((dci-dcoml)/hc3)+1
+
+   fracp = fracp + 1
+   if(fracp>=dpart) then
+       !$omp critical
+       nadv = nadv + 1
+       p1   = (nadv-1)*dpart + 1
+       p2   = nadv*dpart
+       if((nadv+1)*dpart>npt) p2=npt
+       call write_progress_range(cntid,nadv,mxh1,p1,p2,progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',p2,')'
+       fracp = 0
+       !$omp end critical
+   endif
+
+   lp_jq3: do jq3 = iq3-1,iq3+1
+      if(jq3<1.or.jq3>nc3) cycle lp_jq3
+      rcl    = (jq3-1)*hc3+dcoml
+      stm2   = sthmax2(rpmax,dcang(i),rcl)
+      dltdec = 2.0d0*asin(stm2)*rad2deg
+      jq1m   = int(dltdec/hc1)+1
+      lp_jq1: do jq1=iq1-jq1m,iq1+jq1m
+         if(jq1>nc1.or.jq1<1) cycle lp_jq1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2max = iq2+jq2m
+         jq2min = iq2-jq2m
+         if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+         lp_jq2: do jq2=jq2min,jq2max
+            if(jq2>nc2) then
+               jq2t = jq2-nc2
+            else if(jq2<1) then
+               jq2t = jq2+nc2
+            else
+               jq2t = jq2
+            end if
+            j = sk1(jq3,jq2t,jq1)
+            do while(j/=0)
+               rv  = abs(dci-dc1(j))
+               if(rv<=rvmax) then
+                  jlib = idx1(j)
+                  regj = reg1(j) + 1
+                  chi_lo_j = grid(lo1(jlib))
+                  chi_hi_j = grid(hi1(jlib))
+                  if(chi_hi_i < chi_lo_j - pimax .or. chi_hi_j < chi_lo_i - pimax) then
+                     j = ll1(j)
+                     cycle
+                  endif
+                  ang2 = ((xi-x1(j))**2 + (y(i)-y1(j))**2 + (z(i)-z1(j))**2)
+                  if(ang2>0.0d0) then
+                     rp2min_pair = ang2 * (chi_lo_i * chi_lo_j)
+                     rp2max_pair = ang2 * (chi_hi_i * chi_hi_j)
+                     if(rp2min_pair<=rpmax2 .and. rp2max_pair>=rpmin2) then
+                        wpair = dble(wei(i))*dble(wei1(j))
+                        if(wfib==1) then
+                           shth2 = ang2/4.0d0
+                           wpair = wpair*wfiber(shth2)
+                        endif
+                        call accum_exact_grid_pair_sparse_touch(nsepp,sepp2,nsepv,sepv,ang2,grid,prob(:,ilib), &
+                             cdf1(:,jlib),act_idx,act_start(ilib),act_count(ilib),lo1(jlib),hi1(jlib), &
+                             wpair,nreg,regi,regj,cdpv,touch)
+                     endif
+                  endif
+               else
+                  if(jq3>iq3) cycle lp_jq2
+               endif
+               j = ll1(j)
+            end do
+         end do lp_jq2
+      end do lp_jq1
+   end do lp_jq3
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Cjk_grid_wp_wg
+
+
+subroutine rppi_Cjk_gmm_wp(nt,npt,ra,dec,dc,dcang,x,y,z,kpdf,nlib,alpha,mu,sig,idx, &
+           reg,npt1,dc1,dcang1,x1,y1,z1,kpdf1,nlib1,alpha1,mu1,sig1,idx1,reg1, &
+           nreg,nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3, &
+           cntid,logf,progressf,sk1,ll1,cdpv,touch)
+!===============================================================================
+! Jackknife-touch version of rppi_C_gmm_wp(). Supports both single-wide-pi
+! and multi-pi output.
+implicit none
+integer       :: nt,nthr,npt,npt1,nsepp,nsepv,mxh1,mxh2,mxh3,kpdf,nlib,kpdf1,nlib1,nreg
+real(kind=8)  :: ra(npt),dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: dc1(npt1),dcang1(npt1),x1(npt1),y1(npt1),z1(npt1)
+real(kind=8)  :: alpha(kpdf,nlib),mu(kpdf,nlib),sig(kpdf,nlib),alpha1(kpdf1,*),mu1(kpdf1,*),sig1(kpdf1,*)
+integer       :: idx(npt),idx1(npt1),reg(npt),reg1(npt1)
+real(kind=8)  :: sepp(nsepp+1),sepv(nsepv+1),sbound(6),cdpv(nsepv,nsepp),touch(nreg,nsepv,nsepp)
+integer       :: sk1(mxh3,mxh2,mxh1),ll1(npt1)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rvmax,rv,rvsearch,probfloor
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,dci,ang2,rp2
+real(kind=8)  :: pimax,muD,sigD,ppi,wcomp,wpair
+integer       :: nc1,nc2,nc3,fracp,dpart,nadv
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq2min,jq2max,jq2t,jq1m,jq2m,p1,p2
+integer       :: ilib,jlib,kk,llc,regi,regj,ip,ibin
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+fracp = 0 ; dpart = 0 ; nadv = 0
+cdpv   = 0.d0
+touch  = 0.d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(2)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+dpart = int(float(npt)/float(mxh1))
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cdpv,touch) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,dci,rv,ang2,rp2,ii) &
+!$omp& private(ilib,jlib,kk,llc,ip,ibin,muD,sigD,ppi,wcomp,wpair,regi,regj) &
+!$omp& schedule(guided) firstprivate(fracp) if(nthr>1)
+do i=1,npt
+   xi  = x(i)
+   dci = dc(i)
+   ilib = idx(i)
+   regi = reg(i) + 1
+
+   iq1 = int((dec(i)-decl)/hc1)+1
+   iq2 = int((ra(i)-ral)/hc2)+1
+   iq3 = int((dci-dcoml)/hc3)+1
+
+   fracp = fracp + 1
+   if(fracp>=dpart) then
+       !$omp critical
+       nadv = nadv + 1
+       p1   = (nadv-1)*dpart + 1
+       p2   = nadv*dpart
+       if((nadv+1)*dpart>npt) p2=npt
+       call write_progress_range(cntid,nadv,mxh1,p1,p2,progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',p2,')'
+       fracp = 0
+       !$omp end critical
+   endif
+
+   lp_jq3: do jq3 = iq3-1,iq3+1
+      if(jq3<1.or.jq3>nc3) cycle lp_jq3
+      rcl    = (jq3-1)*hc3+dcoml
+      stm2   = sthmax2(rpmax,dcang(i),rcl)
+      dltdec = 2.0d0*asin(stm2)*rad2deg
+      jq1m   = int(dltdec/hc1)+1
+      lp_jq1: do jq1=iq1-jq1m,iq1+jq1m
+         if(jq1>nc1.or.jq1<1) cycle lp_jq1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2max = iq2+jq2m
+         jq2min = iq2-jq2m
+         if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+         lp_jq2: do jq2=jq2min,jq2max
+            if(jq2>nc2) then
+               jq2t = jq2-nc2
+            else if(jq2<1) then
+               jq2t = jq2+nc2
+            else
+               jq2t = jq2
+            end if
+            j = sk1(jq3,jq2t,jq1)
+            do while(j/=0)
+               rv  = abs(dci-dc1(j))
+               if(rv<=rvmax) then
+                  ang2 = ((xi-x1(j))**2 + (y(i)-y1(j))**2 + (z(i)-z1(j))**2)
+                  if(ang2>0.0d0) then
+                     jlib = idx1(j)
+                     regj = reg1(j) + 1
+                     do kk=1,kpdf
+                        do llc=1,kpdf1
+                           wcomp = alpha(kk,ilib)*alpha1(llc,jlib)
+                           if(wcomp<=probfloor) cycle
+                           rp2 = mu(kk,ilib)*mu1(llc,jlib)*ang2
+                           if(rp2>rpmax2) cycle
+
+                           muD = mu(kk,ilib) - mu1(llc,jlib)
+                           sigD = sqrt(sig(kk,ilib)*sig(kk,ilib) + sig1(llc,jlib)*sig1(llc,jlib))
+
+                           ibin = 0
+                           if(rp2>sepp2(nsepp)) then
+                              ibin = nsepp
+                           else
+                              do ii=nsepp-1,1,-1
+                                 if(rp2>sepp2(ii)) then
+                                    ibin = ii
+                                    exit
+                                 endif
+                              enddo
+                           endif
+                           if(ibin<=0) cycle
+
+                           do ip=1,nsepv
+                              ppi = gmm_abs_shell_prob(muD, sigD, sepv(ip), sepv(ip+1))
+                              if ((nsepv == 1 .and. ppi > probfloor) .or. &
+                                  (nsepv > 1 .and. ppi > 0.0d0)) then
+                                 wpair = wcomp*ppi
+                                 cdpv(ip,ibin) = cdpv(ip,ibin) + wpair
+                                 touch(regi,ip,ibin) = touch(regi,ip,ibin) + wpair
+                                 if(regj/=regi) then
+                                    touch(regj,ip,ibin) = touch(regj,ip,ibin) + wpair
+                                 endif
+                              endif
+                           enddo
+                        enddo
+                     enddo
+                  endif
+               else
+                  if(jq3>iq3) cycle lp_jq2
+               endif
+               j = ll1(j)
+            end do
+         end do lp_jq2
+      end do lp_jq1
+   end do lp_jq3
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Cjk_gmm_wp
+
+
+subroutine rppi_Cjk_gmm_wp_wg(nt,npt,ra,dec,dc,dcang,wei,x,y,z,kpdf,nlib,alpha,mu,sig,idx, &
+           reg,npt1,dc1,dcang1,wei1,x1,y1,z1,kpdf1,nlib1,alpha1,mu1,sig1,idx1,reg1, &
+           nreg,nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,wfib, &
+           cntid,logf,progressf,sk1,ll1,cdpv,touch)
+!===============================================================================
+! Weighted jackknife-touch version of rppi_C_gmm_wp(). Supports both
+! single-wide-pi and multi-pi output.
+implicit none
+integer       :: nt,nthr,npt,npt1,nsepp,nsepv,mxh1,mxh2,mxh3,kpdf,nlib,kpdf1,nlib1,wfib,nreg
+real(kind=8)  :: ra(npt),dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=4)  :: wei(npt)
+real(kind=8)  :: dc1(npt1),dcang1(npt1),x1(npt1),y1(npt1),z1(npt1)
+real(kind=4)  :: wei1(npt1)
+real(kind=8)  :: alpha(kpdf,nlib),mu(kpdf,nlib),sig(kpdf,nlib),alpha1(kpdf1,*),mu1(kpdf1,*),sig1(kpdf1,*)
+integer       :: idx(npt),idx1(npt1),reg(npt),reg1(npt1)
+real(kind=8)  :: sepp(nsepp+1),sepv(nsepv+1),sbound(6),cdpv(nsepv,nsepp),touch(nreg,nsepv,nsepp)
+integer       :: sk1(mxh3,mxh2,mxh1),ll1(npt1)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rvmax,rv,rvsearch,probfloor
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,dci,ang2,rp2
+real(kind=8)  :: pimax,muD,sigD,ppi,wcomp,wpair,shth2
+integer       :: nc1,nc2,nc3,fracp,dpart,nadv
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq2min,jq2max,jq2t,jq1m,jq2m,p1,p2
+integer       :: ilib,jlib,kk,llc,regi,regj,ip,ibin
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+fracp = 0 ; dpart = 0 ; nadv = 0
+cdpv   = 0.d0
+touch  = 0.d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(2)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+dpart = int(float(npt)/float(mxh1))
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cdpv,touch) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,dci,rv,ang2,rp2,ii,shth2) &
+!$omp& private(ilib,jlib,kk,llc,ip,ibin,muD,sigD,ppi,wcomp,wpair,regi,regj) &
+!$omp& schedule(guided) firstprivate(fracp) if(nthr>1)
+do i=1,npt
+   xi  = x(i)
+   dci = dc(i)
+   ilib = idx(i)
+   regi = reg(i) + 1
+
+   iq1 = int((dec(i)-decl)/hc1)+1
+   iq2 = int((ra(i)-ral)/hc2)+1
+   iq3 = int((dci-dcoml)/hc3)+1
+
+   fracp = fracp + 1
+   if(fracp>=dpart) then
+       !$omp critical
+       nadv = nadv + 1
+       p1   = (nadv-1)*dpart + 1
+       p2   = nadv*dpart
+       if((nadv+1)*dpart>npt) p2=npt
+       call write_progress_range(cntid,nadv,mxh1,p1,p2,progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',p2,')'
+       fracp = 0
+       !$omp end critical
+   endif
+
+   lp_jq3: do jq3 = iq3-1,iq3+1
+      if(jq3<1.or.jq3>nc3) cycle lp_jq3
+      rcl    = (jq3-1)*hc3+dcoml
+      stm2   = sthmax2(rpmax,dcang(i),rcl)
+      dltdec = 2.0d0*asin(stm2)*rad2deg
+      jq1m   = int(dltdec/hc1)+1
+      lp_jq1: do jq1=iq1-jq1m,iq1+jq1m
+         if(jq1>nc1.or.jq1<1) cycle lp_jq1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2max = iq2+jq2m
+         jq2min = iq2-jq2m
+         if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+         lp_jq2: do jq2=jq2min,jq2max
+            if(jq2>nc2) then
+               jq2t = jq2-nc2
+            else if(jq2<1) then
+               jq2t = jq2+nc2
+            else
+               jq2t = jq2
+            end if
+            j = sk1(jq3,jq2t,jq1)
+            do while(j/=0)
+               rv  = abs(dci-dc1(j))
+               if(rv<=rvmax) then
+                  ang2 = ((xi-x1(j))**2 + (y(i)-y1(j))**2 + (z(i)-z1(j))**2)
+                  if(ang2>0.0d0) then
+                     jlib = idx1(j)
+                     regj = reg1(j) + 1
+                     do kk=1,kpdf
+                        do llc=1,kpdf1
+                           wcomp = alpha(kk,ilib)*alpha1(llc,jlib)
+                           if(wcomp<=probfloor) cycle
+                           rp2 = mu(kk,ilib)*mu1(llc,jlib)*ang2
+                           if(rp2>rpmax2) cycle
+
+                           muD = mu(kk,ilib) - mu1(llc,jlib)
+                           sigD = sqrt(sig(kk,ilib)*sig(kk,ilib) + sig1(llc,jlib)*sig1(llc,jlib))
+
+                           ibin = 0
+                           if(rp2>sepp2(nsepp)) then
+                              ibin = nsepp
+                           else
+                              do ii=nsepp-1,1,-1
+                                 if(rp2>sepp2(ii)) then
+                                    ibin = ii
+                                    exit
+                                 endif
+                              enddo
+                           endif
+                           if(ibin<=0) cycle
+
+                           do ip=1,nsepv
+                              ppi = gmm_abs_shell_prob(muD, sigD, sepv(ip), sepv(ip+1))
+                              if ((nsepv == 1 .and. ppi > probfloor) .or. &
+                                  (nsepv > 1 .and. ppi > 0.0d0)) then
+                                 wpair = dble(wei(i))*dble(wei1(j))*wcomp*ppi
+                                 if(wfib==1) then
+                                    shth2 = ang2/4.0d0
+                                    wpair = wpair*wfiber(shth2)
+                                 endif
+                                 cdpv(ip,ibin) = cdpv(ip,ibin) + wpair
+                                 touch(regi,ip,ibin) = touch(regi,ip,ibin) + wpair
+                                 if(regj/=regi) then
+                                    touch(regj,ip,ibin) = touch(regj,ip,ibin) + wpair
+                                 endif
+                              endif
+                           enddo
+                        enddo
+                     enddo
+                  endif
+               else
+                  if(jq3>iq3) cycle lp_jq2
+               endif
+               j = ll1(j)
+            end do
+         end do lp_jq2
+      end do lp_jq1
+   end do lp_jq3
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Cjk_gmm_wp_wg
+
+subroutine rppi_Cb_gmm_wp(nt,npt,ra,dec,dc,dcang,x,y,z,kpdf,nlib,alpha,mu,sig,idx, &
+           npt1,dc1,dcang1,x1,y1,z1,kpdf1,nlib1,alpha1,mu1,sig1,idx1, &
+           nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,nbts,bseed, &
+           cntid,logf,progressf,sk1,ll1,cdpv,bcdpv)
+!===============================================================================
+! Bootstrap version of rppi_C_gmm_wp(). Mirrors the existing compiled cross
+! bootstrap design by generating multiplicities for both left and right samples.
+implicit none
+integer       :: nt,nthr,npt,npt1,nsepp,nsepv,mxh1,mxh2,mxh3,kpdf,nlib,kpdf1,nlib1,nbts,bseed
+real(kind=8)  :: ra(npt),dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=8)  :: dc1(npt1),dcang1(npt1),x1(npt1),y1(npt1),z1(npt1)
+real(kind=8)  :: alpha(kpdf,nlib),mu(kpdf,nlib),sig(kpdf,nlib),alpha1(kpdf1,*),mu1(kpdf1,*),sig1(kpdf1,*)
+integer       :: idx(npt),idx1(npt1)
+real(kind=8)  :: sepp(nsepp+1),sepv(nsepv+1),sbound(6),cdpv(nsepv,nsepp),bcdpv(nbts,nsepp,nsepv)
+real(kind=4)  :: wbts(nbts,npt),wbts1(nbts,npt1)
+integer       :: sk1(mxh3,mxh2,mxh1),ll1(npt1)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rvmax,rv,rvsearch,probfloor
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,dci,ang2,rp2,wpair
+real(kind=8)  :: pimax,muD,sigD,ppi,wcomp
+integer       :: nc1,nc2,nc3,fracp,dpart,nadv
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq2min,jq2max,jq2t,jq1m,jq2m,p1,p2
+integer       :: ilib,jlib,kk,llc,ip,ibin
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+fracp = 0 ; dpart = 0 ; nadv = 0
+cdpv   = 0.d0
+bcdpv  = 0.d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(2)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+call bootstrap(npt,nbts,bseed,wbts)
+call bootstrap(npt1,nbts,bseed,wbts1)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+dpart = int(float(npt)/float(mxh1))
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cdpv,bcdpv) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,dci,rv,ang2,rp2,ii,wpair) &
+!$omp& private(ilib,jlib,kk,llc,ip,ibin,muD,sigD,ppi,wcomp) &
+!$omp& schedule(guided) firstprivate(fracp) if(nthr>1)
+do i=1,npt
+   xi  = x(i)
+   dci = dc(i)
+   ilib = idx(i)
+
+   iq1 = int((dec(i)-decl)/hc1)+1
+   iq2 = int((ra(i)-ral)/hc2)+1
+   iq3 = int((dci-dcoml)/hc3)+1
+
+   fracp = fracp + 1
+   if(fracp>=dpart) then
+       !$omp critical
+       nadv = nadv + 1
+       p1   = (nadv-1)*dpart + 1
+       p2   = nadv*dpart
+       if((nadv+1)*dpart>npt) p2=npt
+       call write_progress_range(cntid,nadv,mxh1,p1,p2,progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',p2,')'
+       fracp = 0
+       !$omp end critical
+   endif
+
+   lp_jq3: do jq3 = iq3-1,iq3+1
+      if(jq3<1.or.jq3>nc3) cycle lp_jq3
+      rcl    = (jq3-1)*hc3+dcoml
+      stm2   = sthmax2(rpmax,dcang(i),rcl)
+      dltdec = 2.0d0*asin(stm2)*rad2deg
+      jq1m   = int(dltdec/hc1)+1
+      lp_jq1: do jq1=iq1-jq1m,iq1+jq1m
+         if(jq1>nc1.or.jq1<1) cycle lp_jq1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2max = iq2+jq2m
+         jq2min = iq2-jq2m
+         if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+         lp_jq2: do jq2=jq2min,jq2max
+            if(jq2>nc2) then
+               jq2t = jq2-nc2
+            else if(jq2<1) then
+               jq2t = jq2+nc2
+            else
+               jq2t = jq2
+            end if
+            j = sk1(jq3,jq2t,jq1)
+            do while(j/=0)
+               rv  = abs(dci-dc1(j))
+               if(rv<=rvmax) then
+                  ang2 = ((xi-x1(j))**2 + (y(i)-y1(j))**2 + (z(i)-z1(j))**2)
+                  if(ang2>0.0d0) then
+                     jlib = idx1(j)
+                     do kk=1,kpdf
+                        do llc=1,kpdf1
+                           wcomp = alpha(kk,ilib)*alpha1(llc,jlib)
+                           if(wcomp<=probfloor) cycle
+                           rp2 = mu(kk,ilib)*mu1(llc,jlib)*ang2
+                           if(rp2>rpmax2) cycle
+
+                           muD = mu(kk,ilib) - mu1(llc,jlib)
+                           sigD = sqrt(sig(kk,ilib)*sig(kk,ilib) + sig1(llc,jlib)*sig1(llc,jlib))
+
+                           ibin = 0
+                           if(rp2>sepp2(nsepp)) then
+                              ibin = nsepp
+                           else
+                              do ii=nsepp-1,1,-1
+                                 if(rp2>sepp2(ii)) then
+                                    ibin = ii
+                                    exit
+                                 endif
+                              enddo
+                           endif
+                           if(ibin<=0) cycle
+
+                           do ip=1,nsepv
+                              ppi = gmm_abs_shell_prob(muD, sigD, sepv(ip), sepv(ip+1))
+                              if ((nsepv == 1 .and. ppi > probfloor) .or. &
+                                  (nsepv > 1 .and. ppi > 0.0d0)) then
+                                 wpair = wcomp*ppi
+                                 cdpv(ip,ibin) = cdpv(ip,ibin) + wpair
+                                 bcdpv(:,ibin,ip) = bcdpv(:,ibin,ip) + &
+                                      wpair*wbts(:,i)*wbts1(:,j)
+                              endif
+                           enddo
+                        enddo
+                     enddo
+                  endif
+               else
+                  if(jq3>iq3) cycle lp_jq2
+               endif
+               j = ll1(j)
+            end do
+         end do lp_jq2
+      end do lp_jq1
+   end do lp_jq3
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Cb_gmm_wp
+
+
+subroutine rppi_Cb_gmm_wp_wg(nt,npt,ra,dec,dc,dcang,wei,x,y,z,kpdf,nlib,alpha,mu,sig,idx, &
+           npt1,dc1,dcang1,wei1,x1,y1,z1,kpdf1,nlib1,alpha1,mu1,sig1,idx1, &
+           nsepp,sepp,nsepv,sepv,rvsearch,probfloor,sbound,mxh1,mxh2,mxh3,nbts,bseed,wfib, &
+           cntid,logf,progressf,sk1,ll1,cdpv,bcdpv)
+!===============================================================================
+! Weighted bootstrap version of rppi_C_gmm_wp().
+implicit none
+integer       :: nt,nthr,npt,npt1,nsepp,nsepv,mxh1,mxh2,mxh3,kpdf,nlib,kpdf1,nlib1,nbts,bseed,wfib
+real(kind=8)  :: ra(npt),dec(npt),dc(npt),dcang(npt),x(npt),y(npt),z(npt)
+real(kind=4)  :: wei(npt)
+real(kind=8)  :: dc1(npt1),dcang1(npt1),x1(npt1),y1(npt1),z1(npt1)
+real(kind=4)  :: wei1(npt1)
+real(kind=8)  :: alpha(kpdf,nlib),mu(kpdf,nlib),sig(kpdf,nlib),alpha1(kpdf1,*),mu1(kpdf1,*),sig1(kpdf1,*)
+integer       :: idx(npt),idx1(npt1)
+real(kind=8)  :: sepp(nsepp+1),sepv(nsepv+1),sbound(6),cdpv(nsepv,nsepp),bcdpv(nbts,nsepp,nsepv)
+real(kind=4)  :: wbts(nbts,npt),wbts1(nbts,npt1)
+integer       :: sk1(mxh3,mxh2,mxh1),ll1(npt1)
+real(kind=8)  :: ral,rau,decl,decu,dcoml,dcomu,hc1,hc2,hc3
+real(kind=8)  :: sepp2(nsepp+1),rpmax,rpmax2,rvmax,rv,rvsearch,probfloor
+real(kind=8)  :: rcl,stm2,dltdec,dltra,xi,dci,ang2,rp2,wpair
+real(kind=8)  :: pimax,muD,sigD,ppi,wcomp,wpp,shth2
+integer       :: nc1,nc2,nc3,fracp,dpart,nadv
+integer       :: i,ii,j,iq1,iq2,iq3,jq1,jq2,jq3,jq2min,jq2max,jq2t,jq1m,jq2m,p1,p2
+integer       :: ilib,jlib,kk,llc,ip,ibin
+character     :: cntid*32,logf*80,progressf*512
+
+open(11,file=logf,action='write',access='append')
+
+fracp = 0 ; dpart = 0 ; nadv = 0
+cdpv   = 0.d0
+bcdpv  = 0.d0
+rpmax  = sepp(nsepp+1)
+sepp2  = sepp*sepp
+rpmax2 = sepp2(nsepp+1)
+pimax  = sepv(2)
+rvmax  = rvsearch
+
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+dcoml = sbound(5) ; dcomu = sbound(6)
+nc1 = mxh1
+nc2 = mxh2
+if(rvmax<=0.0d0) rvmax = 1.0d-9
+nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
+if(nc3>mxh3) nc3 = mxh3
+hc1 = (decu-decl)/float(nc1)
+hc2 = (rau-ral)/float(nc2)
+hc3 = (dcomu-dcoml)/float(nc3)
+
+call bootstrap(npt,nbts,bseed,wbts)
+call bootstrap(npt1,nbts,bseed,wbts1)
+
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+dpart = int(float(npt)/float(mxh1))
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cdpv,bcdpv) default(shared) &
+!$omp& private(iq1,iq2,iq3,jq1,jq2,jq3,rcl,stm2,dltdec,jq1m) &
+!$omp& private(dltra,jq2m,jq2min,jq2max,jq2t,j,i,xi,dci,rv,ang2,rp2,ii,wpair,wpp,shth2) &
+!$omp& private(ilib,jlib,kk,llc,ip,ibin,muD,sigD,ppi,wcomp) &
+!$omp& schedule(guided) firstprivate(fracp) if(nthr>1)
+do i=1,npt
+   xi  = x(i)
+   dci = dc(i)
+   ilib = idx(i)
+
+   iq1 = int((dec(i)-decl)/hc1)+1
+   iq2 = int((ra(i)-ral)/hc2)+1
+   iq3 = int((dci-dcoml)/hc3)+1
+
+   fracp = fracp + 1
+   if(fracp>=dpart) then
+       !$omp critical
+       nadv = nadv + 1
+       p1   = (nadv-1)*dpart + 1
+       p2   = nadv*dpart
+       if((nadv+1)*dpart>npt) p2=npt
+       call write_progress_range(cntid,nadv,mxh1,p1,p2,progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',p2,')'
+       fracp = 0
+       !$omp end critical
+   endif
+
+   lp_jq3: do jq3 = iq3-1,iq3+1
+      if(jq3<1.or.jq3>nc3) cycle lp_jq3
+      rcl    = (jq3-1)*hc3+dcoml
+      stm2   = sthmax2(rpmax,dcang(i),rcl)
+      dltdec = 2.0d0*asin(stm2)*rad2deg
+      jq1m   = int(dltdec/hc1)+1
+      lp_jq1: do jq1=iq1-jq1m,iq1+jq1m
+         if(jq1>nc1.or.jq1<1) cycle lp_jq1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2max = iq2+jq2m
+         jq2min = iq2-jq2m
+         if(jq2max-jq2min+1>nc2) jq2max = jq2min-1+nc2
+         lp_jq2: do jq2=jq2min,jq2max
+            if(jq2>nc2) then
+               jq2t = jq2-nc2
+            else if(jq2<1) then
+               jq2t = jq2+nc2
+            else
+               jq2t = jq2
+            end if
+            j = sk1(jq3,jq2t,jq1)
+            do while(j/=0)
+               rv  = abs(dci-dc1(j))
+               if(rv<=rvmax) then
+                  ang2 = ((xi-x1(j))**2 + (y(i)-y1(j))**2 + (z(i)-z1(j))**2)
+                  if(ang2>0.0d0) then
+                     jlib = idx1(j)
+                     wpp = wei(i)*wei1(j)
+                     if(wfib==1) then
+                        shth2 = ang2/4.0d0
+                        wpp = wpp*wfiber(shth2)
+                     endif
+                     do kk=1,kpdf
+                        do llc=1,kpdf1
+                           wcomp = alpha(kk,ilib)*alpha1(llc,jlib)
+                           if(wcomp<=probfloor) cycle
+                           rp2 = mu(kk,ilib)*mu1(llc,jlib)*ang2
+                           if(rp2>rpmax2) cycle
+
+                           muD = mu(kk,ilib) - mu1(llc,jlib)
+                           sigD = sqrt(sig(kk,ilib)*sig(kk,ilib) + sig1(llc,jlib)*sig1(llc,jlib))
+
+                           ibin = 0
+                           if(rp2>sepp2(nsepp)) then
+                              ibin = nsepp
+                           else
+                              do ii=nsepp-1,1,-1
+                                 if(rp2>sepp2(ii)) then
+                                    ibin = ii
+                                    exit
+                                 endif
+                              enddo
+                           endif
+                           if(ibin<=0) cycle
+
+                           do ip=1,nsepv
+                              ppi = gmm_abs_shell_prob(muD, sigD, sepv(ip), sepv(ip+1))
+                              if ((nsepv == 1 .and. ppi > probfloor) .or. &
+                                  (nsepv > 1 .and. ppi > 0.0d0)) then
+                                 wpair = wpp*wcomp*ppi
+                                 cdpv(ip,ibin) = cdpv(ip,ibin) + wpair
+                                 bcdpv(:,ibin,ip) = bcdpv(:,ibin,ip) + &
+                                      wpair*wbts(:,i)*wbts1(:,j)
+                              endif
+                           enddo
+                        enddo
+                     enddo
+                  endif
+               else
+                  if(jq3>iq3) cycle lp_jq2
+               endif
+               j = ll1(j)
+            end do
+         end do lp_jq2
+      end do lp_jq1
+   end do lp_jq3
+end do
+!$omp end parallel do
+close(11)
+if(len_trim(progressf)==0) write(*,*) ' '
+end subroutine rppi_Cb_gmm_wp_wg
 
 subroutine rppi_Cb(nt,npt,ra,dec,dc,x,y,z,npt1,dc1,x1,y1,z1,nsepp,sepp,nsepv,sepv, &
            sbound,mxh1,mxh2,mxh3,nbts,bseed,cntid,logf,progressf,sk1,ll1,cdpv,bcdpv)
@@ -3176,6 +9363,7 @@ dcoml = sbound(5) ; dcomu = sbound(6)
 nc1 = mxh1
 nc2 = mxh2
 nc3 =int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
 if(nc3>mxh3) nc3 = mxh3
 hc1 = (decu-decl)/float(nc1)    !effective nr of DEC cells
 hc2 = (rau-ral)/float(nc2)      !effective nr of RA cells
@@ -3380,6 +9568,7 @@ dcoml = sbound(5) ; dcomu = sbound(6)
 nc1 = mxh1
 nc2 = mxh2
 nc3 =int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
 if(nc3>mxh3) nc3 = mxh3
 hc1 = (decu-decl)/float(nc1)    !effective nr of DEC cells
 hc2 = (rau-ral)/float(nc2)      !effective nr of RA cells
@@ -4018,6 +10207,7 @@ dcoml = sbound(5) ; dcomu = sbound(6)
 nc1 = mxh1
 nc2 = mxh2
 nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
 if(nc3>mxh3) nc3 = mxh3
 hc1 = (decu-decl)/float(nc1)
 hc2 = (rau-ral)/float(nc2)
@@ -4152,6 +10342,7 @@ dcoml = sbound(5) ; dcomu = sbound(6)
 nc1 = mxh1
 nc2 = mxh2
 nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
 if(nc3>mxh3) nc3 = mxh3
 hc1 = (decu-decl)/float(nc1)
 hc2 = (rau-ral)/float(nc2)
@@ -4292,6 +10483,7 @@ dcoml = sbound(5) ; dcomu = sbound(6)
 nc1 = mxh1
 nc2 = mxh2
 nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
 if(nc3>mxh3) nc3 = mxh3
 hc1 = (decu-decl)/float(nc1)
 hc2 = (rau-ral)/float(nc2)
@@ -4418,6 +10610,7 @@ dcoml = sbound(5) ; dcomu = sbound(6)
 nc1 = mxh1
 nc2 = mxh2
 nc3 = int((dcomu-dcoml)/rvmax)
+if(nc3<1) nc3 = 1
 if(nc3>mxh3) nc3 = mxh3
 hc1 = (decu-decl)/float(nc1)
 hc2 = (rau-ral)/float(nc2)

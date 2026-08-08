@@ -1,20 +1,44 @@
+[build-system]
+requires = [
+  "scikit-build-core>=1.0",
+  # Build against NumPy 2.x so wheels remain ABI-compatible with NumPy 1.x/2.x.
+  "numpy>=2.0",
+]
+build-backend = "scikit_build_core.build"
+
 [project]
 name = "nugundam"
-license = {file = "LICENSE"}
-version = "0.7"
-description = "nuGUNDAM: a toolkit for angular and projected correlations"
+version = "0.7.1"
+description = "Fast angular, projected, marked, and PDF-aware two-point correlation functions"
 readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
-    { name = "Emilio Donoso", email = "emiliodon@gmail.com.ar" }
+  { name = "Emilio Donoso", email = "emiliodon@gmail.com" },
+]
+keywords = [
+  "astronomy",
+  "galaxy surveys",
+  "correlation functions",
+  "clustering",
+  "redshift PDF",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
-    "Intended Audience :: Developers",
-    "Intended Audience :: Science/Research",
-    "Operating System :: OS Independent",
-    "Programming Language :: Python",
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Fortran",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Topic :: Scientific/Engineering :: Astronomy",
 ]
-requires-python = ">=3.10"
 dependencies = [
   "numpy>=1.24",
   "matplotlib",
@@ -24,6 +48,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "build",
+  "twine",
   "pytest",
   "pytest-cov",
   "pandas",
@@ -31,12 +57,44 @@ dev = [
   "ipython",
 ]
 
-[build-system]
-requires = ["scikit-build-core>=0.10", "numpy>=1.24"]
-build-backend = "scikit_build_core.build"
-
 [tool.scikit-build]
+minimum-version = "build-system.requires"
+cmake.version = ">=3.18"
 wheel.packages = ["src/nugundam"]
+# Keep the Fortran and F2PY interface sources in the sdist, but not in wheels.
+wheel.exclude = ["nugundam/*.f90", "nugundam/*.pyf"]
+
+# Explicit inclusion prevents notes, notebooks, local data, and other accidental
+# files from entering a source distribution merely because they are in the tree.
+sdist.inclusion-mode = "explicit"
+sdist.include = [
+  "CMakeLists.txt",
+  "LICENSE",
+  "README.md",
+  "pyproject.toml",
+  "src/nugundam/**",
+  "tests/**",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# Production Linux wheels. cibuildwheel builds inside manylinux containers and
+# auditwheel bundles non-policy libraries such as libgfortran/libgomp.
+[tool.cibuildwheel]
+build = [
+  "cp310-manylinux_x86_64",
+  "cp311-manylinux_x86_64",
+  "cp312-manylinux_x86_64",
+  "cp313-manylinux_x86_64",
+  "cp314-manylinux_x86_64",
+]
+build-verbosity = 1
+test-requires = ["pytest", "pandas", "pyarrow", "ipython"]
+test-command = "python -m pytest {project}/tests"
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64"]
+manylinux-x86_64-image = "manylinux_2_28"
+# Safe if already installed; required by the F2PY extension build.
+before-all = "dnf install -y gcc-gfortran"

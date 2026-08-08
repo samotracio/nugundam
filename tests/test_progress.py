@@ -49,6 +49,28 @@ def test_run_with_progress_cli_uses_stdout_path(monkeypatch):
     assert seen == [None]
 
 
+
+
+def test_run_with_progress_cli_status_prefix_rewrites_single_line(monkeypatch, capsys):
+    monkeypatch.setattr(progress_mod, 'in_notebook', lambda: False)
+
+    def _target(progress_path):
+        assert progress_path is not None
+        path = Path(progress_path)
+        path.write_text(
+            '====  Counting DR pairs in 11 DEC strips  ====\n'
+            '[DR] stripe 3/11  particles 3637-5454\n',
+            encoding='utf-8',
+        )
+        return 7
+
+    out = run_with_progress(True, None, 0.01, _target, status_prefix='[pcf:mc_pdf] realization 4/40  ')
+    assert out == 7
+    captured = capsys.readouterr()
+    assert '[pcf:mc_pdf] realization 4/40  DR 3/11  particles 3637-5454' in captured.out
+    assert '====  Counting DR pairs' not in captured.out
+
+
 def test_run_with_progress_notebook_uses_temp_file(monkeypatch):
     monkeypatch.setattr(progress_mod, 'in_notebook', lambda: True)
     monkeypatch.setattr(progress_mod, '_prefer_process_backend', lambda: False)

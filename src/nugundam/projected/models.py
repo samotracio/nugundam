@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 import numpy as np
 
@@ -340,6 +341,174 @@ class DistanceSpec(ConfigDocMixin):
 
 
 @dataclass(slots=True)
+class ProjectedPdfSpec(ConfigDocMixin):
+    r"""Photo-z PDF specification for compiled projected PDF modes.
+
+    This spec enables deterministic PDF-marginalized projected clustering.
+    Two representations are supported:
+
+    ``kind="gmm_chi"``
+        Each object is represented by a small Gaussian mixture model (GMM)
+        in comoving distance,
+
+        ``p_i(chi) ~= sum_k alpha_ik N(mu_ik, sigma_ik**2)``.
+
+        Pair probabilities are evaluated analytically from the component
+        pairs and accumulated into one or many line-of-sight ``pi`` bins.
+
+    ``kind="grid_chi_exact"``
+        Empirical PDFs tabulated on a common grid are integrated
+        deterministically. This exact/ePDF path supports single-bin and
+        multi-``pi`` projected measurements. For edge-grid inputs,
+        ``pdf_source.edge_refine`` can reduce radial quantization by
+        sub-sampling each PDF bin as a piecewise-uniform histogram.
+
+    ``kind="quantile_chi"``
+        Empirical PDFs are compressed into equal-probability chi quantiles
+        and integrated as a deterministic Cartesian product of quantile nodes.
+        This is an experimental CPU-first mode intended for early performance
+        validation against GMM/ePDF/MC.
+
+    Random catalogs currently inherit PDFs from the associated data sample
+    through ``random_pdf_policy="inherit"``. Fast jackknife-touch uses
+    ``jk_random_policy="fixed"``; ``"reinherit"`` keeps the more
+    conservative rerun behavior because random PDFs change per leave-one-
+    region-out sample.
+    """
+
+    enabled: bool = field(default=False, metadata={"doc": "Enable deterministic PDF-marginalized projected counts when True. Mutually exclusive with mc_pdf.enabled."})
+    kind: str = field(default="gmm_chi", metadata={"doc": "PDF representation kind: 'gmm_chi', 'grid_chi_exact', or experimental 'quantile_chi'. All deterministic modes support single-bin and multi-pi projected runs for main counts."})
+    k: int = field(default=3, metadata={"doc": "Number of Gaussian components per object used by kind='gmm_chi' and by empirical-PDF compression."})
+    nquant: int = field(default=16, metadata={"doc": "Number of equal-probability chi quantiles used by kind='quantile_chi'. Start with 16 for performance-gated validation; 32 is the proposal's AVX-512 design point."})
+    quantile_storage: str = field(default="float32", metadata={"doc": "Storage dtype for kind='quantile_chi' quantile libraries. Currently 'float32' and 'float64' are supported; 'uint16' is reserved for a later optimized backend."})
+    quantile_positions: str = field(default="midpoint", metadata={"doc": "Quantile-node convention for kind='quantile_chi'. Currently only midpoint nodes (q+0.5)/Nq are supported."})
+    diagnostics: bool = field(default=False, metadata={"doc": "When True, collect detailed quantile_chi pair-pruning counters inside the hot pair-count kernels. Default False keeps production runs lightweight; pair wall times and qchi preparation metadata are still stored."})
+
+    # Column mapping (either explicit lists or prefix-based construction)
+    alpha_cols: list[str] | None = field(default=None, metadata={"doc": "List of alpha (mixture weight) column names (length k) for precomputed GMM inputs."})
+    mu_cols: list[str] | None = field(default=None, metadata={"doc": "List of mu_chi (Mpc/h) column names (length k) for precomputed GMM inputs."})
+    sigma_cols: list[str] | None = field(default=None, metadata={"doc": "List of sigma_chi (Mpc/h) column names (length k) for precomputed GMM inputs."})
+
+    alpha_prefix: str | None = field(default=None, metadata={"doc": "Optional prefix to build alpha column names when alpha_cols is None."})
+    mu_prefix: str | None = field(default=None, metadata={"doc": "Optional prefix to build mu column names when mu_cols is None."})
+    sigma_prefix: str | None = field(default=None, metadata={"doc": "Optional prefix to build sigma column names when sigma_cols is None."})
+    index_base: int = field(default=0, metadata={"doc": "Suffix start index used with prefix-based GMM column construction."})
+
+    rv_search_nsigma: float = field(default=4.0, metadata={"doc": "Search extension used to enlarge the 3D grid depth beyond pi_max. In 'gmm_chi' mode it is measured in component-sigma units; in 'grid_chi_exact' mode it multiplies a conservative PDF half-support span."})
+    prob_floor: float = field(default=1e-10, metadata={"doc": "Probability floor used for pruning. In 'gmm_chi' mode it skips tiny component-pair probabilities; in 'grid_chi_exact' mode it defines active support/search bounds and can speed runs, but nonzero values are approximate for precision multi-pi ePDF validation."})
+    seed: int = field(default=12345, metadata={"doc": "RNG seed used when assigning/inheriting PDFs to random catalogs."})
+
+    random_pdf_policy: str = field(default="inherit", metadata={"doc": "Policy for random PDFs. Currently 'inherit' assigns random-catalog PDFs from the associated data catalog."})
+    jk_random_policy: str = field(default="fixed", metadata={"doc": "PDF jackknife policy for inherited random PDFs: 'fixed' keeps the full-run inherited random PDFs and enables fast touch jackknife; 'reinherit' redraws inherited PDFs from each surviving data sample and uses the rerun backend."})
+
+
+
+
+@dataclass(slots=True)
+class PDFSourceSpec(ConfigDocMixin):
+    """Source description for empirical per-object PDF vectors on a common grid.
+
+    The source can be provided directly as an external matrix, as a single
+    vector-valued column, or as many scalar columns. Unless explicit row-ID
+    fields are supplied, rows are assumed to align with the associated catalog.
+    """
+
+    kind: str = field(default="external_matrix", metadata={"doc": "PDF storage mode: 'external_matrix', 'vector_column', or 'columns'."})
+    matrix: object | None = field(default=None, metadata={"doc": "Optional in-memory PDF matrix with shape (nobj, ngrid)."})
+    path: str | None = field(default=None, metadata={"doc": "Optional path to a .npy/.npz/.parquet file containing the PDF data."})
+    array_key: str | None = field(default=None, metadata={"doc": "Optional dataset key used when loading .npz or multi-array containers."})
+    column: str | None = field(default=None, metadata={"doc": "Vector-valued column name for 'vector_column' sources or parquet vector columns."})
+    columns: list[str] | None = field(default=None, metadata={"doc": "Explicit list of scalar PDF column names for 'columns' sources."})
+    prefix: str | None = field(default=None, metadata={"doc": "Optional prefix used to discover scalar PDF columns when columns=None."})
+    id_column: str | None = field(default=None, metadata={"doc": "Optional row-ID column present in the PDF source used for alignment."})
+    catalog_id_column: str | None = field(default=None, metadata={"doc": "Optional row-ID column in the science/random catalog used for alignment."})
+
+
+@dataclass(slots=True)
+class ProjectedMCPdfSpec(ConfigDocMixin):
+    """Monte-Carlo PDF resampling specification for projected correlations.
+
+    MC-PDF mode treats each galaxy PDF as an empirical distribution on a
+    common redshift or chi grid. For every realization, one point distance is
+    drawn per object and the normal projected point-count backend is used.
+    Count terms are averaged across realizations before evaluating the final
+    estimator.
+
+    Multi-``pi`` projected measurements are supported. For coarse edge-grid
+    PDFs, set ``sample_within_bin=True`` so each selected PDF bin is sampled
+    continuously inside its edges rather than at a bin center. This is the MC
+    analogue of ``pdf_source.edge_moments`` for GMM and
+    ``pdf_source.edge_refine`` for exact/ePDF.
+
+    Bootstrap and jackknife are supported through rerun and fast backends.
+    The fast backend requires fixed random treatment for inherited-random
+    runs, controlled by ``resampling_random_policy="fixed"``.
+    """
+
+    enabled: bool = field(default=False, metadata={"doc": "Enable Monte-Carlo PDF resampling when True. Supports single/multi-pi runs and optional bootstrap/jackknife resampling."})
+    nreal: int = field(default=20, metadata={"doc": "Number of Monte-Carlo realizations used for the main/full-sample MC estimate."})
+    seed: int = field(default=12345, metadata={"doc": "Base RNG seed used for PDF sampling."})
+    z_grid: object | None = field(default=None, metadata={"doc": "Common redshift grid used by the empirical PDFs. May be an array or a path."})
+    chi_grid: object | None = field(default=None, metadata={"doc": "Optional common comoving-distance grid in the same units used by the projected run. Overrides z_grid when supplied."})
+    grid_kind: str = field(default="centers", metadata={"doc": "Whether the supplied z_grid/chi_grid contains bin centers or bin edges: 'centers' or 'edges'."})
+    pdf_data: PDFSourceSpec | None = field(default=None, metadata={"doc": "Empirical PDF source for the auto-correlation data catalog."})
+    pdf_random: PDFSourceSpec | None = field(default=None, metadata={"doc": "Optional empirical PDF source for the auto-correlation random catalog."})
+    pdf_data1: PDFSourceSpec | None = field(default=None, metadata={"doc": "Empirical PDF source for the first cross-correlation data catalog."})
+    pdf_random1: PDFSourceSpec | None = field(default=None, metadata={"doc": "Optional empirical PDF source for the first cross-correlation random catalog."})
+    pdf_data2: PDFSourceSpec | None = field(default=None, metadata={"doc": "Empirical PDF source for the second cross-correlation data catalog."})
+    pdf_random2: PDFSourceSpec | None = field(default=None, metadata={"doc": "Optional empirical PDF source for the second cross-correlation random catalog."})
+    random_mode: str = field(default="fixed_global", metadata={"doc": "Random-catalog redshift policy when explicit random PDFs are absent: 'fixed_global', 'rerun_global', or 'inherit_realization'."})
+    resampling_nreal: int | None = field(default=None, metadata={"doc": "Number of MC realizations used inside each bootstrap/jackknife resample. None uses nreal; smaller values trade covariance speed for extra MC noise."})
+    resampling_backend: str = field(default="auto", metadata={"doc": "MC bootstrap/jackknife backend: 'auto', 'rerun', or 'fast'. Fast averages point-resampling counts over MC draws and requires fixed random treatment for inherited-random runs."})
+    resampling_random_policy: str = field(default="reinherit", metadata={"doc": "Random treatment for MC resampling with random_mode='inherit_realization': 'reinherit' or 'fixed'. The fast bootstrap/jackknife backends require 'fixed'."})
+    store_realizations: bool = field(default=False, metadata={"doc": "Store full-sample per-MC-realization wp(rp) curves when True. Per-resample per-MC internals are not stored by default."})
+    sample_within_bin: bool = field(default=False, metadata={"doc": "If True, after drawing a PDF grid bin, sample a continuous distance uniformly within that bin instead of using the bin center. For grid_kind='edges' the supplied edges are used; for grid_kind='centers' pseudo-edges are inferred from neighboring centers."})
+    support_prob_floor: float = field(default=0.0, metadata={"doc": "Optional floor applied when defining active MC PDF support on the common grid."})
+
+
+@dataclass(slots=True)
+class ProjectedPdfSourceSpec(ConfigDocMixin):
+    """Empirical-PDF input specification for compiled projected PDF modes.
+
+    This spec reuses :class:`PDFSourceSpec` to describe per-object empirical
+    PDFs tabulated on a shared grid. Depending on ``config.pdf.kind``, those
+    PDFs are either compressed into a fixed-k chi-space GMM
+    (``'gmm_chi'``) or kept on a shared/refined chi grid for exact
+    deterministic pair integration (``'grid_chi_exact'``).
+
+    For edge-grid inputs, ``edge_moments=True`` is the GMM quantization fix:
+    each PDF bin contributes its continuous within-bin mean and variance
+    during GMM compression. For exact/ePDF, ``edge_refine > 1`` is the
+    corresponding histogram/quadrature refinement: each input bin is split
+    into equal-width chi sub-bins with uniformly distributed probability.
+
+    Notes
+    -----
+    * The GMM path uses the single global ``config.pdf.k`` value for the whole
+      run.
+    * Random-catalog PDFs are currently implicit through
+      ``pdf.random_pdf_policy='inherit'``.
+    """
+
+    enabled: bool = field(default=False, metadata={"doc": "Enable empirical-PDF input for compiled deterministic PDF mode when True. Used for GMM compression and exact/ePDF grid integration."})
+    z_grid: object | None = field(default=None, metadata={"doc": "Common redshift grid used by the empirical PDFs. May be an array or a path."})
+    chi_grid: object | None = field(default=None, metadata={"doc": "Optional common comoving-distance grid in the same units used by the projected run. Overrides z_grid when supplied."})
+    grid_kind: str = field(default="centers", metadata={"doc": "Whether the supplied z_grid/chi_grid contains bin centers or bin edges: 'centers' or 'edges'."})
+    compressor: str = field(default="segments_equal_mass", metadata={"doc": "Compression scheme used to convert common-grid PDFs into a fixed-k chi-space GMM when pdf.kind='gmm_chi'."})
+    eps: float = field(default=0.0, metadata={"doc": "Optional additive floor applied to empirical PDFs before row renormalization."})
+    sigma_floor: float = field(default=1e-6, metadata={"doc": "Minimum Gaussian width enforced for degenerate or empty compressed GMM components."})
+    edge_moments: bool = field(default=True, metadata={"doc": "For grid_kind='edges' in GMM compression, treat PDF probability as uniformly distributed within each chi bin and include within-bin variance. This avoids radial quantization from coarse empirical PDF grids."})
+    edge_refine: int = field(default=1, metadata={"doc": "For grid_kind='edges' in exact/ePDF mode, split each input PDF bin into this many equal-width chi sub-bins and distribute the bin probability uniformly. Values >1 reduce radial quantization in multi-pi exact/ePDF runs at extra memory/runtime cost."})
+    store_compressed: bool = field(default=False, metadata={"doc": "Reserved flag for optionally storing compressed alpha/mu/sigma products in future versions."})
+    pdf_data: PDFSourceSpec | None = field(default=None, metadata={"doc": "Empirical PDF source for the auto-correlation data catalog."})
+    pdf_random: PDFSourceSpec | None = field(default=None, metadata={"doc": "Reserved for future explicit empirical PDF source for the auto-correlation random catalog."})
+    pdf_data1: PDFSourceSpec | None = field(default=None, metadata={"doc": "Empirical PDF source for the first cross-correlation data catalog."})
+    pdf_random1: PDFSourceSpec | None = field(default=None, metadata={"doc": "Reserved for future explicit empirical PDF source for the first cross-correlation random catalog."})
+    pdf_data2: PDFSourceSpec | None = field(default=None, metadata={"doc": "Empirical PDF source for the second cross-correlation data catalog."})
+    pdf_random2: PDFSourceSpec | None = field(default=None, metadata={"doc": "Reserved for future explicit empirical PDF source for the second cross-correlation random catalog."})
+
+
+@dataclass(slots=True)
 class ProjectedAutoConfig(ConfigDocMixin):
     """Configuration for projected auto-correlation measurements.
 
@@ -359,8 +528,12 @@ class ProjectedAutoConfig(ConfigDocMixin):
     jackknife: JackknifeSpec = field(default_factory=JackknifeSpec, metadata={"doc": "Jackknife uncertainty options."})
     progress: ProgressSpec = field(default_factory=ProgressSpec, metadata={"doc": "Progress-reporting options."})
     split_random: SplitRandomSpec = field(default_factory=SplitRandomSpec, metadata={"doc": "Optional split-random RR acceleration for LS auto-correlations."})
+    pdf: ProjectedPdfSpec = field(default_factory=ProjectedPdfSpec, metadata={"doc": "Optional deterministic photo-z PDF specification for compiled GMM or exact/ePDF projected mode."})
+    pdf_source: ProjectedPdfSourceSpec = field(default_factory=ProjectedPdfSourceSpec, metadata={"doc": "Optional empirical-PDF source specification used for GMM compression or exact/ePDF grid integration."})
+    mc_pdf: ProjectedMCPdfSpec = field(default_factory=ProjectedMCPdfSpec, metadata={"doc": "Optional Monte-Carlo PDF resampling specification, including multi-pi and bootstrap/jackknife backend options."})
     nthreads: int = field(default=-1, metadata={"doc": "Number of OpenMP threads; -1 lets the runtime choose."})
     description: str = field(default="", metadata={"doc": "Optional free-form description stored with the run metadata."})
+    store_config: Literal["none", "compact", "full"] = field(default="compact", metadata={"doc": "Level of configuration snapshot stored in result metadata: 'none', 'compact', or 'full'."})
 
 
 @dataclass(slots=True)
@@ -383,8 +556,12 @@ class ProjectedCrossConfig(ConfigDocMixin):
     bootstrap: BootstrapSpec = field(default_factory=lambda: BootstrapSpec(mode="primary"), metadata={"doc": "Bootstrap uncertainty options."})
     jackknife: JackknifeSpec = field(default_factory=JackknifeSpec, metadata={"doc": "Jackknife uncertainty options."})
     progress: ProgressSpec = field(default_factory=ProgressSpec, metadata={"doc": "Progress-reporting options."})
+    pdf: ProjectedPdfSpec = field(default_factory=ProjectedPdfSpec, metadata={"doc": "Optional deterministic photo-z PDF specification for compiled GMM or exact/ePDF projected mode."})
+    pdf_source: ProjectedPdfSourceSpec = field(default_factory=ProjectedPdfSourceSpec, metadata={"doc": "Optional empirical-PDF source specification used for GMM compression or exact/ePDF grid integration."})
+    mc_pdf: ProjectedMCPdfSpec = field(default_factory=ProjectedMCPdfSpec, metadata={"doc": "Optional Monte-Carlo PDF resampling specification, including multi-pi and bootstrap/jackknife backend options."})
     nthreads: int = field(default=-1, metadata={"doc": "Number of OpenMP threads; -1 lets the runtime choose."})
     description: str = field(default="", metadata={"doc": "Optional free-form description stored with the run metadata."})
+    store_config: Literal["none", "compact", "full"] = field(default="compact", metadata={"doc": "Level of configuration snapshot stored in result metadata: 'none', 'compact', or 'full'."})
 
 
 @dataclass(slots=True)
@@ -404,8 +581,11 @@ class ProjectedAutoCountsConfig(ConfigDocMixin):
     bootstrap: BootstrapSpec = field(default_factory=BootstrapSpec, metadata={"doc": "Bootstrap resampling options for DD counts."})
     jackknife: JackknifeSpec = field(default_factory=JackknifeSpec, metadata={"doc": "Jackknife uncertainty options."})
     progress: ProgressSpec = field(default_factory=ProgressSpec, metadata={"doc": "Progress-reporting options."})
+    pdf: ProjectedPdfSpec = field(default_factory=ProjectedPdfSpec, metadata={"doc": "Optional deterministic photo-z PDF specification for compiled GMM or exact/ePDF projected counts."})
+    pdf_source: ProjectedPdfSourceSpec = field(default_factory=ProjectedPdfSourceSpec, metadata={"doc": "Optional empirical-PDF source specification used for GMM compression or exact/ePDF grid integration."})
     nthreads: int = field(default=-1, metadata={"doc": "Number of OpenMP threads; -1 lets the runtime choose."})
     description: str = field(default="", metadata={"doc": "Optional free-form description stored with the run metadata."})
+    store_config: Literal["none", "compact", "full"] = field(default="compact", metadata={"doc": "Level of configuration snapshot stored in result metadata: 'none', 'compact', or 'full'."})
 
 
 @dataclass(slots=True)
@@ -426,8 +606,11 @@ class ProjectedCrossCountsConfig(ConfigDocMixin):
     bootstrap: BootstrapSpec = field(default_factory=lambda: BootstrapSpec(mode="primary"), metadata={"doc": "Bootstrap resampling options for D1D2 counts."})
     jackknife: JackknifeSpec = field(default_factory=JackknifeSpec, metadata={"doc": "Jackknife uncertainty options."})
     progress: ProgressSpec = field(default_factory=ProgressSpec, metadata={"doc": "Progress-reporting options."})
+    pdf: ProjectedPdfSpec = field(default_factory=ProjectedPdfSpec, metadata={"doc": "Optional deterministic photo-z PDF specification for compiled GMM or exact/ePDF projected counts."})
+    pdf_source: ProjectedPdfSourceSpec = field(default_factory=ProjectedPdfSourceSpec, metadata={"doc": "Optional empirical-PDF source specification used for GMM compression or exact/ePDF grid integration."})
     nthreads: int = field(default=-1, metadata={"doc": "Number of OpenMP threads; -1 lets the runtime choose."})
     description: str = field(default="", metadata={"doc": "Optional free-form description stored with the run metadata."})
+    store_config: Literal["none", "compact", "full"] = field(default="compact", metadata={"doc": "Level of configuration snapshot stored in result metadata: 'none', 'compact', or 'full'."})
 
 
 @dataclass(slots=True)
@@ -452,6 +635,25 @@ class PreparedProjectedSample:
     mxh1: int
     mxh2: int
     mxh3: int
+
+    # Optional PDF payload. The legacy GMM fields remain for backwards
+    # compatibility, while exact common-grid PDFs use pdf_repr='grid_chi_exact'.
+    dcang: np.ndarray | None = None
+    pdf_repr: str = "none"
+    pdf_k: int = 0
+    pdf_alpha_lib: np.ndarray | None = None
+    pdf_mu_lib: np.ndarray | None = None
+    pdf_sig_lib: np.ndarray | None = None
+    pdf_prob_lib: np.ndarray | None = None
+    pdf_cdf_lib: np.ndarray | None = None
+    pdf_grid: np.ndarray | None = None
+    pdf_lo_idx: np.ndarray | None = None
+    pdf_hi_idx: np.ndarray | None = None
+    pdf_qchi_lib: np.ndarray | None = None
+    pdf_qlo_lib: np.ndarray | None = None
+    pdf_qhi_lib: np.ndarray | None = None
+    pdf_idx: np.ndarray | None = None
+
     region_id: np.ndarray | None = None
     grid_meta: dict = field(default_factory=dict)
 
@@ -572,9 +774,15 @@ class ProjectedCorrelationResult(ResultIOMixin):
 
     The result stores the integrated projected statistic ``wp`` together with
     the underlying count terms so that ``xi(r_p, pi)`` can be reconstructed for
-    plotting and I/O. When jackknife resampling is enabled, the full covariance
-    matrix is stored in ``cov`` and the optional leave-one-region-out
-    realizations are stored in ``realizations``.
+    plotting and I/O. When bootstrap resampling is enabled,
+    ``bootstrap_realizations`` stores the fully integrated curves and
+    ``bootstrap_cumulative_realizations`` stores the cumulative
+    :math:`w_p(<\\Pi_{\\max})` curves with shape ``(n_bootstrap, n_rp, n_pi)``.
+    A separate ``bootstrap_counts`` object is used only when the bootstrap
+    counts are generated from a different count ensemble than ``counts``
+    (currently the fast MC-PDF backend). When jackknife resampling is enabled,
+    the full covariance matrix is stored in ``cov`` and the optional
+    leave-one-region-out realizations are stored in ``realizations``.
     """
     rp_edges: np.ndarray
     rp_centers: np.ndarray
@@ -584,4 +792,9 @@ class ProjectedCorrelationResult(ResultIOMixin):
     counts: ProjectedAutoCounts | ProjectedCrossCounts
     cov: np.ndarray | None = None
     realizations: np.ndarray | None = None
+    mc_wp_std: np.ndarray | None = None
+    mc_realizations: np.ndarray | None = None
+    bootstrap_realizations: np.ndarray | None = None
+    bootstrap_cumulative_realizations: np.ndarray | None = None
+    bootstrap_counts: ProjectedAutoCounts | ProjectedCrossCounts | None = None
     metadata: dict = field(default_factory=dict)

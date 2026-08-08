@@ -99,6 +99,7 @@ def _auto_counts_to_prepare_config(config: AngularAutoCountsConfig) -> AngularAu
         progress=config.progress,
         nthreads=config.nthreads,
         description=config.description,
+        store_config=config.store_config,
     )
 
 
@@ -117,6 +118,7 @@ def _cross_counts_to_prepare_config(config: AngularCrossCountsConfig) -> Angular
         progress=config.progress,
         nthreads=config.nthreads,
         description=config.description,
+        store_config=config.store_config,
     )
 
 

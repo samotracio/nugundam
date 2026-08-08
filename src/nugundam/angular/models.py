@@ -701,6 +701,8 @@ class BootstrapSpec(ConfigDocMixin):
     bseed: int = field(default=12345, metadata={"doc": "Random seed used for bootstrap resampling."})
     mode: BootstrapMode = field(default="none", metadata={"doc": "Bootstrap strategy: 'none', 'primary', or 'both'."})
     primary: PrimaryRole = field(default="data1", metadata={"doc": "Primary sample used by cross-correlation bootstrap schemes."})
+    store_counts: bool = field(default=True, metadata={"doc": "Retain per-bootstrap pair-count arrays when available. For projected MC-fast runs these are stored in result.bootstrap_counts; standard and deterministic-PDF runs keep them in result.counts. MC rerun backends may not have a single shared count cube."})
+    store_cumulative: bool = field(default=True, metadata={"doc": "For projected correlations, retain cumulative bootstrap w_p(<Pi_max) realizations with shape (n_bootstrap, n_rp, n_pi). Ignored by angular correlations."})
 
 
 @dataclass(slots=True)
@@ -802,6 +804,7 @@ class AngularAutoConfig(ConfigDocMixin):
     split_random: SplitRandomSpec = field(default_factory=SplitRandomSpec, metadata={"doc": "Optional split-random RR acceleration for LS auto-correlations."})
     nthreads: int = field(default=-1, metadata={"doc": "Number of OpenMP threads; -1 lets the runtime choose."})
     description: str = field(default="", metadata={"doc": "Optional free-form description stored with the run metadata."})
+    store_config: Literal["none", "compact", "full"] = field(default="compact", metadata={"doc": "Level of configuration snapshot stored in result metadata: 'none', 'compact', or 'full'."})
 
 
 @dataclass(slots=True)
@@ -825,6 +828,7 @@ class AngularCrossConfig(ConfigDocMixin):
     progress: ProgressSpec = field(default_factory=ProgressSpec, metadata={"doc": "Progress-reporting options."})
     nthreads: int = field(default=-1, metadata={"doc": "Number of OpenMP threads; -1 lets the runtime choose."})
     description: str = field(default="", metadata={"doc": "Optional free-form description stored with the run metadata."})
+    store_config: Literal["none", "compact", "full"] = field(default="compact", metadata={"doc": "Level of configuration snapshot stored in result metadata: 'none', 'compact', or 'full'."})
 
 
 @dataclass(slots=True)
@@ -846,6 +850,7 @@ class AngularAutoCountsConfig(ConfigDocMixin):
     split_random: SplitRandomSpec = field(default_factory=SplitRandomSpec, metadata={"doc": "Optional split-random RR acceleration for LS auto-correlations."})
     nthreads: int = field(default=-1, metadata={"doc": "Number of OpenMP threads; -1 lets the runtime choose."})
     description: str = field(default="", metadata={"doc": "Optional free-form description stored with the run metadata."})
+    store_config: Literal["none", "compact", "full"] = field(default="compact", metadata={"doc": "Level of configuration snapshot stored in result metadata: 'none', 'compact', or 'full'."})
 
 
 @dataclass(slots=True)
@@ -868,6 +873,7 @@ class AngularCrossCountsConfig(ConfigDocMixin):
     split_random: SplitRandomSpec = field(default_factory=SplitRandomSpec, metadata={"doc": "Optional split-random RR acceleration for LS auto-correlations."})
     nthreads: int = field(default=-1, metadata={"doc": "Number of OpenMP threads; -1 lets the runtime choose."})
     description: str = field(default="", metadata={"doc": "Optional free-form description stored with the run metadata."})
+    store_config: Literal["none", "compact", "full"] = field(default="compact", metadata={"doc": "Level of configuration snapshot stored in result metadata: 'none', 'compact', or 'full'."})
 
 
 @dataclass(slots=True)
