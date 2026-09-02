@@ -18,6 +18,9 @@ Python interface. The current package exposes clean, typed APIs for:
 
 ## What is included
 
+This readme briefly describes the main features. Full RTD documentation is available
+[here](https://nugundam.readthedocs.io/en/latest/)
+
 ### Angular API
 
 - `acf(data, random, config)`
@@ -1022,21 +1025,3 @@ Low-level auxiliary functions are also available:
 
 The function `plot_compare_ratio` builds a two-panel comparison plot with shared axes,
 which supports several correlation curves on top and multiple curve ratios below.
-
-## Package layout
-
-```text
-src/nugundam/
-├── angular/
-├── projected/
-├── core/
-├── io.py
-├── ascii_io.py
-├── plotting.py
-├── angular_public.py
-├── projected_public.py
-├── marked.py
-├── result_meta.py
-├── cflibfor.f90
-└── cflibfor.pyf
-```
