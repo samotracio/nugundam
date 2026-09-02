@@ -1,0 +1,39 @@
+[data-md-color-scheme="slate"] .ng-name {
+  font-variant: small-caps;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+[data-md-color-scheme="slate"] .method-name {
+  background-color: rgb(39, 51, 61);
+  color: rgb(222, 219, 142);
+  border: 1px solid rgb(78, 115, 128);
+  border-radius: 0.35rem;
+  padding: 0.08rem 0.28rem;
+}
+
+[data-md-color-scheme="slate"] .inline-option {
+  font-family: var(--md-code-font-family);
+  color: rgb(145, 208, 93);
+}
+
+.placeholder-block {
+  border: 1px dashed rgba(255, 255, 255, 0.35);
+  border-radius: 0.35rem;
+  padding: 0.8rem 1rem;
+  margin: 1rem 0;
+}
+
+.version-badge {
+  display: inline-block;
+  padding: 0.12rem 0.48rem;
+  border: 1px solid var(--md-accent-fg-color);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.math-note {
+  border-left: 0.25rem solid var(--md-accent-fg-color);
+  padding-left: 0.8rem;
+}

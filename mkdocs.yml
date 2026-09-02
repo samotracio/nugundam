@@ -1,0 +1,100 @@
+site_name: νGundam
+site_description: Fast angular, projected, marked, and PDF-aware two-point correlation functions
+site_author: Emilio Donoso
+copyright: Copyright &copy; νGundam contributors
+
+theme:
+  name: material
+  logo: images/logo.png
+  favicon: images/favicon.png
+  palette:
+    scheme: slate
+    primary: blue grey
+    accent: yellow
+  font:
+    text: Merriweather Sans
+    code: Red Hat Mono
+  features:
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+
+nav:
+  - 1. Introduction: index.md
+  - 2. Installation: installation.md
+  - 3. Example A - Angular correlations: example_angular.md
+  - 4. Example B - Projected correlations: example_projected.md
+  - 5. Example C - PDF-aware correlations: example_pdf.md
+  - 6. Example D - Marked correlations: example_marked.md
+  - 7. Correlation-function basics: correlation_basics.md
+  - 8. Catalogs, randoms, and geometry: catalogs_randoms_geometry.md
+  - 9. Binning, estimators, and weights: binning_estimators_weights.md
+  - 10. Cross-correlations: cross_correlations.md
+  - 11. PDF-aware methods: pdf_methods.md
+  - 12. Resampling and uncertainties: resampling.md
+  - 13. Results, plotting, and I/O: results_plotting_io.md
+  - 14. Performance and large catalogs: performance.md
+  - 15. API reference: api.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths:
+            - src
+          options:
+            docstring_style: numpy
+            docstring_section_style: table
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            group_by_category: true
+            members: true
+            inherited_members: true
+            filters:
+              - "!^_"
+            members_order: source
+            merge_init_into_class: true
+            separate_signature: true
+            show_signature_annotations: true
+            signature_crossrefs: true
+            modernize_annotations: true
+            show_source: false
+
+extra_css:
+  - css/mkdocstrings.css
+  - css/typography.css
+  - css/overrides.css
+  - css/nugundam.css
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true

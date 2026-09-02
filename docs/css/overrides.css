@@ -1,0 +1,16 @@
+/* Wider central content, matching the roomy Skykatana documentation layout. */
+@media (min-width: 76.25em) {
+  .md-grid {
+    max-width: 100rem;
+  }
+
+  .md-content__inner {
+    max-width: 82rem;
+  }
+}
+
+@media (min-width: 100rem) {
+  .md-content__inner {
+    max-width: 90rem;
+  }
+}

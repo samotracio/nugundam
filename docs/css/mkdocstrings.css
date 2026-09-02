@@ -1,0 +1,36 @@
+/* Expand the header logo, following the visual proportions of Skykatana. */
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  height: 2.5rem;
+  width: auto;
+}
+
+/* Compact API tables. */
+.md-typeset table:not([class]) th,
+.md-typeset table:not([class]) td {
+  padding: 0.28rem 0.45rem;
+  line-height: 1.4;
+  vertical-align: top;
+}
+
+/* Give narrative API descriptions a visible boundary. */
+.md-typeset .doc.doc-contents > p:not(:has(> .doc-section-title)) {
+  border-left: 0.22rem solid #707070;
+  border-right: 0.22rem solid #707070;
+  padding: 0.42rem 0.65rem;
+  border-radius: 0.25rem;
+  margin: 0 0 0.6rem 0;
+}
+
+.md-typeset .doc-section-title {
+  font-weight: 700;
+}
+
+.doc-symbol-parameter::after { content: "P"; }
+.doc-symbol-type_parameter::after { content: "P"; }
+.doc-symbol-attribute::after { content: "A"; }
+.doc-symbol-function::after { content: "F"; }
+.doc-symbol-method::after { content: "M"; }
+.doc-symbol-class::after { content: "C"; }
+.doc-symbol-type_alias::after { content: "T"; }
+.doc-symbol-module::after { content: "M"; }
