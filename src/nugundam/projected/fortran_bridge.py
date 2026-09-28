@@ -783,7 +783,7 @@ def _run_rppi_split_rr_counts(random: PreparedProjectedSample, *, rp_edges, pi_e
             rp_edges=rp_edges,
             pi_edges=pi_edges,
             nthreads=nthreads,
-            weight_mode=",
+            weight_mode="unweighted",
             doboot=False,
             dojk=dojk,
             nreg=nreg,
