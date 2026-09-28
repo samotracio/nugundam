@@ -783,7 +783,7 @@ def _run_rppi_split_rr_counts(random: PreparedProjectedSample, *, rp_edges, pi_e
             rp_edges=rp_edges,
             pi_edges=pi_edges,
             nthreads=nthreads,
-            weight_mode="unweighted",
+            weight_mode=",
             doboot=False,
             dojk=dojk,
             nreg=nreg,
@@ -1559,7 +1559,7 @@ def build_cross_counts(data1: PreparedProjectedSample, random1: PreparedProjecte
         if random1 is None or random2 is None:
             raise ValueError("random1 and random2 are required for projected cross LS.")
         t0 = time.perf_counter()
-        r1d2, _, r1d2_touch = run_rppi_cross_counts(random1, data2, rp_edges=rp_edges, pi_edges=pi_edges, nthreads=nthreads, weight_mode="unweighted", doboot=False, dojk=dojk, nreg=nreg, nbts=0, bseed=bseed, cntid="R2", progress_file=progress_file, pair_diagnostics=pair_diagnostics)
+        r1d2, _, r1d2_touch = run_rppi_cross_counts(random1, data2, rp_edges=rp_edges, pi_edges=pi_edges, nthreads=nthreads, weight_mode=weight_mode, doboot=False, dojk=dojk, nreg=nreg, nbts=0, bseed=bseed, cntid="R2", progress_file=progress_file, pair_diagnostics=pair_diagnostics)
         r1d2_elapsed = time.perf_counter() - t0
         r1d2_diag = _consume_last_pair_diagnostics()
         t0 = time.perf_counter()
