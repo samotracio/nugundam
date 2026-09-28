@@ -330,7 +330,7 @@ def build_cross_counts(data1: PreparedAngularSample, random1: PreparedAngularSam
     if estimator == "LS":
         if random1 is None or random2 is None:
             raise ValueError("random1 and random2 are required for cross LS.")
-        r1d2, _, r1d2_touch = run_theta_cross_counts(random1, data2, theta_edges=theta_edges, nthreads=nthreads, weight_mode="unweighted", doboot=False, dojk=dojk, nreg=nreg, nbts=0, bseed=bseed, cntid="R2", progress_file=progress_file)
+        r1d2, _, r1d2_touch = run_theta_cross_counts(random1, data2, theta_edges=theta_edges, nthreads=nthreads, weight_mode=weight_mode, doboot=False, dojk=dojk, nreg=nreg, nbts=0, bseed=bseed, cntid="R2", progress_file=progress_file)
         r1r2, _, r1r2_touch = run_theta_cross_counts(random1, random2, theta_edges=theta_edges, nthreads=nthreads, weight_mode="unweighted", doboot=False, dojk=dojk, nreg=nreg, nbts=0, bseed=bseed, cntid="RR", progress_file=progress_file)
     elif estimator == "NAT":
         if random1 is None or random2 is None:
