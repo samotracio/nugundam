@@ -9961,6 +9961,7 @@ else
 endif
 call omp_set_num_threads(nthr)
 stm2 = sin(dltdec*0.5*deg2rad)
+jq1m = int(dltdec/hc1)+1
 dpart = int(float(npt)/float(mxh1))
 call write_progress_header(cntid,mxh1,progressf)
 !$omp parallel do reduction(+:cdth,touch) default(shared) &
