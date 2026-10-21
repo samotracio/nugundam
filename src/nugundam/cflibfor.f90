@@ -857,6 +857,71 @@ end do
 end subroutine skll2d
 
 
+subroutine cell_offsets(npt1,mxh1,mxh2,sk1,ll1,coff,ok)
+!===============================================================================
+! NAME
+!  cell_offsets()
+!
+! DESCRIPTION
+!  Find where each SK cell starts when the particles are stored cell by cell,
+!  ordered by DEC cell and then by RA cell (pxorder="natural"). The particles
+!  of RA cells q2a..q2b in DEC strip q1 are then coff(q2a,q1)+1..coff(q2b+1,q1)
+!
+! INPUTS
+!  Variable---Type-------------Description--------------------------------------
+!  npt1       int              Number of particles
+!  mxh1       int              Nr of DEC cells of skip table
+!  mxh2       int              Nr of RA cells of skip table
+!  sk1        int(mxh2,mxh1)   Skip table (SK) contructed with skll2d()
+!  ll1        int(npt1)        Linked list (LL) contructed with skll2d()
+!
+! OUTPUTS
+!  Variable---Type-------------Description--------------------------------------
+!  coff       int(mxh2+1,mxh1) Index of the last particle before each cell
+!  ok         logical          False if the particles are not stored in that
+!                              order, in which case coff cannot be used
+
+implicit none
+integer      :: npt1,mxh1,mxh2,sk1(mxh2,mxh1),ll1(npt1),coff(mxh2+1,mxh1)
+logical      :: ok
+integer      :: q1,q2,j,n,jmin,jmax,pos
+integer, allocatable :: cnt(:,:)
+
+ok = .false.
+allocate(cnt(mxh2,mxh1))
+
+!----------------------------------------------------
+! Size and first particle of each cell. Each cell must be a contiguous block
+pos = npt1+1
+do q1=1,mxh1
+   do q2=1,mxh2
+      j = sk1(q2,q1) ; n = 0 ; jmin = npt1+1 ; jmax = 0
+      do while(j/=0)
+         n = n+1 ; jmin = min(jmin,j) ; jmax = max(jmax,j)
+         j = ll1(j)
+      end do
+      if(n>0 .and. jmax-jmin+1/=n) return
+      cnt(q2,q1)  = n
+      coff(q2,q1) = jmin
+      pos = min(pos,jmin)
+   end do
+end do
+
+!----------------------------------------------------
+! Cumulative offsets. The blocks must follow each other in grid order
+pos = pos-1   !particles outside the DEC range of the grid come first
+do q1=1,mxh1
+   do q2=1,mxh2
+      if(cnt(q2,q1)>0 .and. coff(q2,q1)/=pos+1) return
+      coff(q2,q1) = pos
+      pos = pos+cnt(q2,q1)
+   end do
+   coff(mxh2+1,q1) = pos
+end do
+ok = .true.
+end subroutine cell_offsets
+
+
 subroutine th_A(nt,npt,dec,x,y,z,nsep,sep,sbound,mxh1,mxh2,cntid,logf,progressf,sk,ll,aa)
 !===============================================================================
 ! NAME
@@ -1020,6 +1085,253 @@ end do !iq1 loop
 !$omp end parallel do
 close(11)  ! close log
 end subroutine th_A
+
+
+subroutine th_A_grp(nt,npt,ra,dec,x,y,z,nsep,sep,sbound,mxh1,mxh2,gmax,cntid,logf,progressf,sk,ll,aa)
+!===============================================================================
+! NAME
+!  th_A_grp()
+!
+! DESCRIPTION
+!  Same counts as th_A(), computed faster with the scheme of th_C_grp(). It
+!  needs the particles stored cell by cell, as prepared with pxorder="natural"
+!  or "cell-dec" (see cell_offsets()); otherwise it calls th_A(). Each pair is
+!  counted once: a particle only looks at its own DEC strip and the strips
+!  above it, and in its own strip only at the particles stored after it (j>i).
+!
+! INPUTS
+!  Same as th_A(), plus
+!  ra         r8(npt)          RA of particles [deg]
+!  gmax       int              Maximum number of particles per group (<=64)
+!
+! OUTPUTS
+!  Variable---Type-------------Description--------------------------------------
+!  aa         r8(nsep)         Counts in angular separation bins
+
+implicit none
+real(kind=8) :: ra(npt),dec(npt),ral,rau,decl,decu,hc1,hc2,stm2,dltra,dltdec
+real(kind=8) :: x(npt),y(npt),z(npt),sep(nsep+1),sep2(nsep+1),sep2max,sbound(4),xi,yi,zi
+real(kind=8) :: aa(nsep)
+integer      :: nt,nthr,npt,mxh1,mxh2,nsep,sk(mxh2,mxh1),ll(npt),gmax,gmx
+integer      :: dpart,nadv,nc1,nc2,i,ii,iq1,iq2,p1,jq1,jq1m,jq2m,jq2max,jq2min
+integer      :: nr,r,j0,k,kst,nb,nbe,lo,hi,g,ngrp,ia,ib,n,iq1f,iq2f,iq1min,iq1max
+integer      :: ibeg,iend,jlo(2),jhi(2),giq1(64)
+integer, parameter :: nbk = 128
+real(kind=8) :: d2(nbk),dmin,dmax
+integer(kind=8) :: cum(nsep+1),full(0:nsep+1),c,acc
+integer, allocatable :: coff(:,:),gstart(:)
+logical      :: ok
+character    :: cntid*32,logf*80,progressf*512
+
+!----------------------------------------------------
+! Find the blocks of each cell, or fall back to the linked list
+allocate(coff(mxh2+1,mxh1))
+call cell_offsets(npt,mxh1,mxh2,sk,ll,coff,ok)
+if(.not.ok) then
+   deallocate(coff)
+   call th_A(nt,npt,dec,x,y,z,nsep,sep,sbound,mxh1,mxh2,cntid,logf,progressf,sk,ll,aa)
+   return
+endif
+
+!------Open log file---------------------------------
+open(11,file=logf,action='write',access='append')
+
+!----------------------------------------------------
+! reset the counts, set max. ang. distance and square bins
+cum     = 0
+full    = 0
+dltdec  = sep(nsep+1)
+sep2    = 4.0d0*(sin(0.5*sep*deg2rad))**2
+sep2max = sep2(nsep+1)
+gmx     = max(1,min(gmax,64))
+
+!-----------------------------------
+! Unpack boundaries and get cell dimensions in (dec,ra)
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+nc1 = mxh1
+nc2 = mxh2
+hc1 = (decu-decl)/float(nc1)   !effective nr of DEC cells
+hc2 = (rau-ral)/float(nc2)     !effective nr of RA cells
+
+!----------------------------------------------------
+! Set the number of threads
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+!----------------------------------------------------
+! Some inits
+dpart = (npt + mxh1 - 1)/mxh1 ! ceil(npt/mxh1): keep progress messages <= mxh1
+stm2  = sin(dltdec*0.5*deg2rad)
+jq1m  = int(dltdec/hc1)+1
+
+!----------------------------------------------------
+! Only the particles inside the grid are counted, as in th_A()
+ibeg = coff(1,1)+1
+iend = coff(nc2+1,nc1)
+
+!----------------------------------------------------
+! Groups of consecutive particles within 2 DEC strips and 4 RA cells of the
+! first one (never across RA=ral, so the RA ranges need no wrapping)
+allocate(gstart(npt+1))
+ngrp = 0
+i = ibeg
+do while(i<=iend)
+   ngrp = ngrp + 1
+   gstart(ngrp) = i
+   iq1f = int((dec(i)-decl)/hc1)+1
+   iq2f = int((ra(i)-ral)/hc2)+1
+   n = 1
+   do while(i+n<=iend .and. n<gmx)
+      iq1 = int((dec(i+n)-decl)/hc1)+1
+      iq2 = int((ra(i+n)-ral)/hc2)+1
+      if(abs(iq1-iq1f)>2 .or. abs(iq2-iq2f)>4) exit
+      n = n + 1
+   end do
+   i = i + n
+end do
+gstart(ngrp+1) = iend+1
+
+!----------------------------------------------------
+! Count pairs in SK grid. Chunks of 16 groups keep the threads on nearby
+! regions of the sky
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cum,full) default(shared) &
+!$omp& private(g,ia,ib,i,iq1,iq2,iq1min,iq1max,jq1,dltra,jq2m,jq2min,jq2max,giq1) &
+!$omp& private(nr,r,jlo,jhi,j0,nb,nbe,k,kst,ii,lo,hi,c,d2,dmin,dmax,xi,yi,zi,nadv,p1) &
+!$omp& schedule(dynamic,16) if(nthr>1)
+
+do g=1,ngrp
+   ia = gstart(g)
+   ib = gstart(g+1)-1
+   nadv = (ib-1)/dpart + 1   !report the last progress stripe that starts in this group
+   p1   = (nadv-1)*dpart + 1
+   if(p1>=ia) then
+       !$omp critical
+       call write_progress_range(cntid,nadv,mxh1,p1,min(nadv*dpart,npt),progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',min(nadv*dpart,npt),')' !for disk
+       flush(11)
+       !$omp end critical
+   endif
+
+   iq1min = nc1
+   iq1max = 1
+   do i=ia,ib
+      giq1(i-ia+1) = int((dec(i)-decl)/hc1)+1
+      iq1min = min(iq1min,giq1(i-ia+1))
+      iq1max = max(iq1max,giq1(i-ia+1))
+   end do
+
+   ! Only the group's own strips and the strips above them
+   lp_jq1: do jq1=iq1min,iq1max+jq1m
+      if(jq1>nc1) cycle lp_jq1
+
+      ! Union of the RA cells that each particle of the group needs in this strip
+      jq2min = huge(jq2min)
+      jq2max = -huge(jq2max)
+      do i=ia,ib
+         iq1 = giq1(i-ia+1)
+         if(jq1<iq1 .or. jq1>iq1+jq1m) cycle
+         iq2 = int((ra(i)-ral)/hc2)+1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2min = min(jq2min,iq2-jq2m)
+         jq2max = max(jq2max,iq2+jq2m)
+      end do
+      if(jq2max<jq2min) cycle lp_jq1
+
+      ! Those RA cells as one or two blocks of particles
+      if(jq2max-jq2min+1>=nc2) then
+         nr = 1
+         jlo(1) = coff(1,jq1)+1        ; jhi(1) = coff(nc2+1,jq1)
+      else if(jq2min<1) then
+         nr = 2
+         jlo(1) = coff(jq2min+nc2,jq1)+1 ; jhi(1) = coff(nc2+1,jq1)
+         jlo(2) = coff(1,jq1)+1          ; jhi(2) = coff(jq2max+1,jq1)
+      else if(jq2max>nc2) then
+         nr = 2
+         jlo(1) = coff(jq2min,jq1)+1   ; jhi(1) = coff(nc2+1,jq1)
+         jlo(2) = coff(1,jq1)+1        ; jhi(2) = coff(jq2max-nc2+1,jq1)
+      else
+         nr = 1
+         jlo(1) = coff(jq2min,jq1)+1   ; jhi(1) = coff(jq2max+1,jq1)
+      end if
+
+      do r=1,nr
+         do j0=jlo(r),jhi(r),nbk
+            nb = min(nbk,jhi(r)-j0+1)
+            do i=ia,ib
+               iq1 = giq1(i-ia+1)
+               if(jq1<iq1 .or. jq1>iq1+jq1m) cycle
+               ! In its own strip, a particle only pairs with those stored after it
+               kst = 1
+               if(jq1==iq1) then
+                  if(i>=j0+nb-1) cycle
+                  kst = max(1,i-j0+2)
+               endif
+               nbe = nb-kst+1
+               xi = x(i)
+               yi = y(i)
+               zi = z(i)
+               dmin = huge(dmin)
+               dmax = -1.0d0
+               !$omp simd reduction(min:dmin) reduction(max:dmax)
+               do k=kst,nb
+                  d2(k) = (xi-x(j0+k-1))**2 + (yi-y(j0+k-1))**2 + (zi-z(j0+k-1))**2
+                  dmin = min(dmin,d2(k))
+                  dmax = max(dmax,d2(k))
+               end do
+               if(dmin>sep2max) then
+                  full(nsep+1) = full(nsep+1) + nbe   !whole block beyond the last edge
+                  cycle
+               endif
+               ! Edges 1..hi are below dmax, edges 1..lo below dmin
+               hi = nsep+1
+               do while(hi>0)
+                  if(sep2(hi)<dmax) exit
+                  hi = hi - 1
+               end do
+               lo = hi
+               do while(lo>0)
+                  if(sep2(lo)<dmin) exit
+                  lo = lo - 1
+               end do
+               full(lo) = full(lo) + nbe
+               do ii=lo+1,hi
+                  c = 0
+                  !$omp simd reduction(+:c)
+                  do k=kst,nb
+                     if(d2(k)>sep2(ii)) c = c + 1
+                  end do
+                  cum(ii) = cum(ii) + c
+               end do
+            end do
+         end do
+      end do
+
+   end do lp_jq1
+end do
+!$omp end parallel do
+
+!----------------------------------------------------
+! cum(ii) = pairs with shth2 > sep2(ii); full(l) = pairs beyond edges 1..l
+acc = 0
+do ii=nsep+1,1,-1
+   acc = acc + full(ii)
+   cum(ii) = cum(ii) + acc
+end do
+do ii=1,nsep
+   aa(ii) = real(cum(ii)-cum(ii+1),8)
+end do
+close(11)  ! close log
+end subroutine th_A_grp
 
 
 subroutine th_A_wg(nt,npt,dec,wei,x,y,z,nsep,sep,sbound,mxh1,mxh2,wfib,cntid,logf,progressf,sk,ll,aa)
@@ -1749,6 +2061,246 @@ end do
 !$omp end parallel do
 close(11)  ! close log
 end subroutine th_C
+
+
+subroutine th_C_grp(nt,npt,ra,dec,x,y,z,npt1,x1,y1,z1, &
+                    nsep,sep,sbound,mxh1,mxh2,gmax,cntid,logf,progressf,sk1,ll1,cdth)
+!===============================================================================
+! NAME
+!  th_C_grp()
+!
+! DESCRIPTION
+!  Same counts as th_C(), computed faster. It needs the particles of sampleD
+!  stored cell by cell, as prepared with pxorder="natural" or "cell-dec" (see
+!  cell_offsets()); otherwise it calls th_C().
+!   1. Each DEC strip is walked as one or two contiguous blocks of particles
+!      instead of following the linked list cell by cell.
+!   2. In each block, only the bin edges between the smallest and largest
+!      distance are compared pair by pair; the edges below the smallest take
+!      the whole block at once. The loops over a block are vectorized.
+!   3. Consecutive particles of sampleC that are close in the sky are taken in
+!      groups of up to gmax, which share each block of sampleD while it is in
+!      cache.
+!   4. The groups are shared between threads in chunks of 16, so that the
+!      threads work on neighbouring regions of the sky and share the cache.
+!
+! INPUTS
+!  Same as th_C(), plus
+!  gmax       int              Maximum number of sampleC particles per group
+!
+! OUTPUTS
+!  Variable---Type-------------Description--------------------------------------
+!  cdth       r8(nsep)         Counts in angular separation bins
+
+implicit none
+real(kind=8) :: ra(npt),dec(npt),ral,rau,decl,decu,hc1,hc2,stm2,dltra,dltdec
+real(kind=8) :: x(npt),y(npt),z(npt),x1(npt1),y1(npt1),z1(npt1)
+real(kind=8) :: sep(nsep+1),sep2(nsep+1),sbound(4),sep2max,xi,yi,zi
+real(kind=8) :: cdth(nsep)
+integer      :: nt,nthr,sk1(mxh2,mxh1),ll1(npt1),mxh1,mxh2,npt,npt1,nsep,gmax
+integer      :: dpart,nadv,nc1,nc2,i,ii,iq1,iq2,p1,jq1,jq1m,jq2m,jq2max,jq2min
+integer      :: nr,r,j0,k,nb,lo,hi,g,ngrp,ia,ib,n,iq1f,iq2f,iq1min,iq1max
+integer      :: jlo(2),jhi(2)
+integer, parameter :: nbk = 128
+real(kind=8) :: d2(nbk),dmin,dmax
+integer(kind=8) :: cum(nsep+1),full(0:nsep+1),c,acc
+integer, allocatable :: coff(:,:),gstart(:)
+logical      :: ok
+character    :: cntid*32,logf*80,progressf*512
+
+!----------------------------------------------------
+! Find the blocks of each cell, or fall back to the linked list
+allocate(coff(mxh2+1,mxh1))
+call cell_offsets(npt1,mxh1,mxh2,sk1,ll1,coff,ok)
+if(.not.ok) then
+   deallocate(coff)
+   call th_C(nt,npt,ra,dec,x,y,z,npt1,x1,y1,z1,nsep,sep,sbound,mxh1,mxh2,cntid,logf,progressf,sk1,ll1,cdth)
+   return
+endif
+
+!------Open log file---------------------------------
+open(11,file=logf,action='write',access='append')
+
+!----------------------------------------------------
+! reset the counts, set max. ang. distance and square bins
+cum     = 0
+full    = 0
+dltdec  = sep(nsep+1)
+sep2    = 4.0d0*(sin(0.5*sep*deg2rad))**2
+sep2max = sep2(nsep+1)
+
+!-----------------------------------
+! Unpack boundaries and get cell dimensions in (dec,ra)
+ral = sbound(1) ; rau = sbound(2) ; decl = sbound(3) ; decu = sbound(4)
+nc1 = mxh1
+nc2 = mxh2
+hc1 = (decu-decl)/float(nc1)   !effective nr of DEC cells
+hc2 = (rau-ral)/float(nc2)     !effective nr of RA cells
+
+!----------------------------------------------------
+! Set the number of threads
+if(nt<=0) then
+   nthr = omp_get_num_procs()
+else
+   nthr = nt
+endif
+call omp_set_num_threads(nthr)
+
+!----------------------------------------------------
+! Some inits
+dpart = (npt + mxh1 - 1)/mxh1 ! ceil(npt/mxh1): keep progress messages <= mxh1
+stm2  = sin(dltdec*0.5*deg2rad)
+jq1m  = int(dltdec/hc1)+1
+
+!----------------------------------------------------
+! Groups of consecutive sampleC particles within 2 DEC strips and 4 RA cells
+! of the first one (never across RA=ral, so the RA ranges need no wrapping)
+allocate(gstart(npt+1))
+ngrp = 0
+i = 1
+do while(i<=npt)
+   ngrp = ngrp + 1
+   gstart(ngrp) = i
+   iq1f = int((dec(i)-decl)/hc1)+1
+   iq2f = int((ra(i)-ral)/hc2)+1
+   n = 1
+   do while(i+n<=npt .and. n<gmax)
+      iq1 = int((dec(i+n)-decl)/hc1)+1
+      iq2 = int((ra(i+n)-ral)/hc2)+1
+      if(abs(iq1-iq1f)>2 .or. abs(iq2-iq2f)>4) exit
+      n = n + 1
+   end do
+   i = i + n
+end do
+gstart(ngrp+1) = npt+1
+
+!----------------------------------------------------
+! Count pairs in SK grid. Chunks of 16 groups keep the threads on nearby
+! regions of the sky
+call write_progress_header(cntid,mxh1,progressf)
+!$omp parallel do reduction(+:cum,full) default(shared) &
+!$omp& private(g,ia,ib,i,iq1,iq2,iq1min,iq1max,jq1,dltra,jq2m,jq2min,jq2max) &
+!$omp& private(nr,r,jlo,jhi,j0,nb,k,ii,lo,hi,c,d2,dmin,dmax,xi,yi,zi,nadv,p1) &
+!$omp& schedule(dynamic,16) if(nthr>1)
+
+do g=1,ngrp
+   ia = gstart(g)
+   ib = gstart(g+1)-1
+   nadv = (ib-1)/dpart + 1   !report the last progress stripe that starts in this group
+   p1   = (nadv-1)*dpart + 1
+   if(p1>=ia) then
+       !$omp critical
+       call write_progress_range(cntid,nadv,mxh1,p1,min(nadv*dpart,npt),progressf)
+       write(11,*) cntid//' counting in DEC strip > ',nadv,' (',p1,'-',min(nadv*dpart,npt),')' !for disk
+       flush(11)
+       !$omp end critical
+   endif
+
+   iq1min = nc1
+   iq1max = 1
+   do i=ia,ib
+      iq1 = int((dec(i)-decl)/hc1)+1
+      iq1min = min(iq1min,iq1)
+      iq1max = max(iq1max,iq1)
+   end do
+
+   lp_jq1: do jq1=iq1min-jq1m,iq1max+jq1m
+      if(jq1>nc1.or.jq1<1) cycle lp_jq1
+
+      ! Union of the RA cells that each particle of the group needs in this strip
+      jq2min = huge(jq2min)
+      jq2max = -huge(jq2max)
+      do i=ia,ib
+         iq1 = int((dec(i)-decl)/hc1)+1
+         if(abs(jq1-iq1)>jq1m) cycle
+         iq2 = int((ra(i)-ral)/hc2)+1
+         if(jq1==iq1) then
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,1)
+         else
+            dltra = dalp(stm2,dec(i),dec(i)*deg2rad,jq1,hc1,decl,0)
+         end if
+         jq2m   = int(dltra/hc2)+1
+         jq2min = min(jq2min,iq2-jq2m)
+         jq2max = max(jq2max,iq2+jq2m)
+      end do
+      if(jq2max<jq2min) cycle lp_jq1
+
+      ! Those RA cells as one or two blocks of particles
+      if(jq2max-jq2min+1>=nc2) then
+         nr = 1
+         jlo(1) = coff(1,jq1)+1        ; jhi(1) = coff(nc2+1,jq1)
+      else if(jq2min<1) then
+         nr = 2
+         jlo(1) = coff(jq2min+nc2,jq1)+1 ; jhi(1) = coff(nc2+1,jq1)
+         jlo(2) = coff(1,jq1)+1          ; jhi(2) = coff(jq2max+1,jq1)
+      else if(jq2max>nc2) then
+         nr = 2
+         jlo(1) = coff(jq2min,jq1)+1   ; jhi(1) = coff(nc2+1,jq1)
+         jlo(2) = coff(1,jq1)+1        ; jhi(2) = coff(jq2max-nc2+1,jq1)
+      else
+         nr = 1
+         jlo(1) = coff(jq2min,jq1)+1   ; jhi(1) = coff(jq2max+1,jq1)
+      end if
+
+      do r=1,nr
+         do j0=jlo(r),jhi(r),nbk
+            nb = min(nbk,jhi(r)-j0+1)
+            do i=ia,ib
+               xi = x(i)
+               yi = y(i)
+               zi = z(i)
+               dmin = huge(dmin)
+               dmax = -1.0d0
+               !$omp simd reduction(min:dmin) reduction(max:dmax)
+               do k=1,nb
+                  d2(k) = (xi-x1(j0+k-1))**2 + (yi-y1(j0+k-1))**2 + (zi-z1(j0+k-1))**2
+                  dmin = min(dmin,d2(k))
+                  dmax = max(dmax,d2(k))
+               end do
+               if(dmin>sep2max) then
+                  full(nsep+1) = full(nsep+1) + nb   !whole block beyond the last edge
+                  cycle
+               endif
+               ! Edges 1..hi are below dmax, edges 1..lo below dmin
+               hi = nsep+1
+               do while(hi>0)
+                  if(sep2(hi)<dmax) exit
+                  hi = hi - 1
+               end do
+               lo = hi
+               do while(lo>0)
+                  if(sep2(lo)<dmin) exit
+                  lo = lo - 1
+               end do
+               full(lo) = full(lo) + nb
+               do ii=lo+1,hi
+                  c = 0
+                  !$omp simd reduction(+:c)
+                  do k=1,nb
+                     if(d2(k)>sep2(ii)) c = c + 1
+                  end do
+                  cum(ii) = cum(ii) + c
+               end do
+            end do
+         end do
+      end do
+
+   end do lp_jq1
+end do
+!$omp end parallel do
+
+!----------------------------------------------------
+! cum(ii) = pairs with shth2 > sep2(ii); full(l) = pairs beyond edges 1..l
+acc = 0
+do ii=nsep+1,1,-1
+   acc = acc + full(ii)
+   cum(ii) = cum(ii) + acc
+end do
+do ii=1,nsep
+   cdth(ii) = real(cum(ii)-cum(ii+1),8)
+end do
+close(11)  ! close log
+end subroutine th_C_grp
 
 
 subroutine th_C_wg(nt,npt,ra,dec,wei,x,y,z,npt1,wei1,x1,y1,z1, &
