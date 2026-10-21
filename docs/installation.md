@@ -39,6 +39,8 @@ python -m pip install --no-binary=nugundam "nugundam==0.7.1"
     python -m pip install --no-binary=nugundam --no-cache-dir "nugundam==0.7.1"
     ```
 
+    On CPUs with AVX-512, add `-mprefer-vector-width=512` to `FFLAGS`; otherwise GCC uses 256-bit vectors. The angular block kernels run about twice as fast with this build as with a generic one (see [Performance](performance.md#unweighted-angular-pair-counts)).
+
     A binary produced with `-march=native` may not run on an older or different CPU. Use it only for an environment that will remain on compatible hardware.
 
 ## Wheel installation
@@ -92,6 +94,58 @@ Expected output includes version `0.7.1` and `compiled extension available: True
 
 !!! warning "Python import without the extension"
     The Python package can be imported when the compiled extension is absent so that configuration objects and documentation remain inspectable. Production pair counting requires the compiled backend. Always check `compiled_available` in a newly built environment.
+
+## Try the faster angular pair counts
+
+Unweighted angular correlations use block kernels that give the same pair counts as the linked-list kernels in less time (see [Performance](performance.md#unweighted-angular-pair-counts)). Check that they are compiled:
+
+```python
+from nugundam import cflibfor
+print(cflibfor.compiled_available, hasattr(cflibfor.mod, "th_A_grp"))   # True True
+```
+
+To try them on your own catalogs, save the script below as `try_block_kernels.py`, set the file names, column names and bins, and run it. It computes the same $w(\theta)$ with the block kernels and with the linked-list kernels, and prints both times and whether the results are identical. The linked-list run is the slow one; leave it out for very large catalogs.
+
+```python
+import os
+import time
+
+import numpy as np
+import nugundam as ng
+from astropy.table import Table
+
+data = Table.read("data.fits")       # your galaxy catalog
+random = Table.read("random.fits")   # randoms covering the same footprint
+
+cfg = ng.AngularAutoConfig(
+    estimator="LS",
+    columns_data=ng.CatalogColumns(ra="ra", dec="dec"),      # column names; degrees
+    columns_random=ng.CatalogColumns(ra="ra", dec="dec"),
+    binning=ng.AngularBinning.from_limits(nsep=20, sepmin=1 / 60, sepmax=100 / 60),  # degrees
+    weights=ng.WeightSpec(weight_mode="unweighted"),
+    progress=ng.ProgressSpec(enabled=False),
+    nthreads=16,
+)
+
+t0 = time.perf_counter()
+fast = ng.acf(data, random, cfg)                   # block kernels, the default
+t_fast = time.perf_counter() - t0
+
+os.environ["NUGUNDAM_LEGACY_KERNELS"] = "1"        # linked-list kernels, for comparison
+t0 = time.perf_counter()
+legacy = ng.acf(data, random, cfg)
+t_legacy = time.perf_counter() - t0
+del os.environ["NUGUNDAM_LEGACY_KERNELS"]
+
+print(f"block kernels: {t_fast:.1f} s, linked-list kernels: {t_legacy:.1f} s")
+print("identical w(theta):", np.array_equal(fast.wtheta, legacy.wtheta))
+```
+
+```bash
+python try_block_kernels.py
+```
+
+Runs with weights, jackknife or bootstrap, or with `cfg.grid.pxorder = "none"`, use the linked-list kernels.
 
 ## OpenMP and thread count
 
