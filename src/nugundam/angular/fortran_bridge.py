@@ -57,6 +57,22 @@ def _has_kernel(name: str) -> bool:
         return False
 
 
+# Particles of the first sample that th_A_grp/th_C_grp take together, sharing each
+# block of the second sample while it is in cache.
+_GROUP_SIZE = 32
+
+
+def _use_block_kernels(name: str) -> bool:
+    """Whether to count with the block kernel ``name`` (th_A_grp or th_C_grp).
+
+    They give the same counts as th_A/th_C, faster. NUGUNDAM_LEGACY_KERNELS=1
+    restores th_A/th_C, e.g. to compare them.
+    """
+    if os.environ.get("NUGUNDAM_LEGACY_KERNELS", "").strip().lower() in {"1", "true", "yes"}:
+        return False
+    return _has_kernel(name)
+
+
 
 
 def _rr_norm_pairs_full(n_random: int) -> float:
@@ -194,6 +210,8 @@ def run_theta_auto_counts(
         return np.asarray(dd), _transpose_bootstrap(bdd), None, None, None
     if weighted:
         dd = cff.mod.th_A_wg(nt, npt, data.dec, data.weights, data.x, data.y, data.z, nsep, theta_edges, data.sbound, data.mxh1, data.mxh2, 0, cntid, _LOG_SINK, progressf, data.sk, data.ll)
+    elif _use_block_kernels("th_A_grp"):
+        dd = cff.mod.th_A_grp(nt, npt, data.ra, data.dec, data.x, data.y, data.z, nsep, theta_edges, data.sbound, data.mxh1, data.mxh2, _GROUP_SIZE, cntid, _LOG_SINK, progressf, data.sk, data.ll)
     else:
         dd = cff.mod.th_A(nt, npt, data.dec, data.x, data.y, data.z, nsep, theta_edges, data.sbound, data.mxh1, data.mxh2, cntid, _LOG_SINK, progressf, data.sk, data.ll)
     return np.asarray(dd), _boot_array(nsep), None, None, None
@@ -247,6 +265,8 @@ def run_theta_cross_counts(
         return np.asarray(dd), _transpose_bootstrap(bdd), None
     if weighted:
         dd = cff.mod.th_C_wg(nt, npt, left.ra, left.dec, left.weights, left.x, left.y, left.z, npt1, right.weights, right.x, right.y, right.z, nsep, theta_edges, right.sbound, right.mxh1, right.mxh2, 0, cntid, _LOG_SINK, progressf, right.sk, right.ll)
+    elif _use_block_kernels("th_C_grp"):
+        dd = cff.mod.th_C_grp(nt, npt, left.ra, left.dec, left.x, left.y, left.z, npt1, right.x, right.y, right.z, nsep, theta_edges, right.sbound, right.mxh1, right.mxh2, _GROUP_SIZE, cntid, _LOG_SINK, progressf, right.sk, right.ll)
     else:
         dd = cff.mod.th_C(nt, npt, left.ra, left.dec, left.x, left.y, left.z, npt1, right.x, right.y, right.z, nsep, theta_edges, right.sbound, right.mxh1, right.mxh2, cntid, _LOG_SINK, progressf, right.sk, right.ll)
     return np.asarray(dd), _boot_array(nsep), None

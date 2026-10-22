@@ -13,6 +13,36 @@ from nugundam.cflibfor import compiled_available
 assert compiled_available
 ```
 
+## Unweighted angular pair counts
+
+`acf` and `accf` count unweighted angular pairs (no weights, jackknife or bootstrap) with block kernels: `th_A_grp` for pairs within one catalog (DD, RR) and `th_C_grp` for pairs between two catalogs (DR and the cross terms). They give exactly the same counts as the linked-list kernels `th_A` and `th_C`, in less time:
+
+- **Contiguous blocks.** The particles are stored cell by cell, so the neighbouring cells of a declination strip are one contiguous range of particles. Each range is read in blocks of 128 particles instead of following the linked list of each cell.
+- **Only the edges that matter.** For each block, the kernel finds the smallest and largest separation. Every bin edge below the smallest separation receives the whole block at once; only the edges between the smallest and largest separation are compared particle by particle. Most blocks fall inside one bin and need no comparison at all. The loops over a block are vectorized.
+- **Groups.** Up to 32 neighbouring particles of the first catalog are processed together, so each block is reused while it is in cache.
+- **Threads.** Threads take neighbouring groups in chunks of 16, so they share the cache.
+
+The block kernels need the particles stored cell by cell, which is the default ordering (`cfg.grid.pxorder = "natural"`, also `"cell-dec"`). With `pxorder = "none"` the linked-list kernels are used. Weighted, jackknife and bootstrap counts, and projected correlations, also use the linked-list kernels.
+
+Reference timing: Landy–Szalay $w(\theta)$ with 20 logarithmic bins from 1′ to 100′, 1.92 million galaxies and 9.19 million randoms, 16 threads on an Intel Core i9-9960X:
+
+| Kernels and build | Time |
+|---|---|
+| linked-list kernels | 512 s |
+| block kernels, generic build | 143 s |
+| block kernels, `-march=native` build (AVX-512) | 71 s |
+
+The block kernels gain about a factor two from a machine-specific build. On CPUs with AVX-512, also pass `-mprefer-vector-width=512`; otherwise GCC uses 256-bit vectors:
+
+```bash
+export FFLAGS="-O3 -march=native -mprefer-vector-width=512"
+python -m pip install --no-cache-dir .
+```
+
+On CPUs without AVX-512 the extra flag has no effect.
+
+The block kernels are used automatically; nothing changes in the configuration. `NUGUNDAM_LEGACY_KERNELS=1` in the environment restores the linked-list kernels, for example to compare them. To try both on your own catalogs, see [Installation](installation.md#try-the-faster-angular-pair-counts).
+
 ## Threads
 
 ```python

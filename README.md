@@ -154,6 +154,15 @@ The compiled extension is built from:
 - `src/nugundam/cflibfor.f90`
 - `src/nugundam/cflibfor.pyf`
 
+For a build optimized for the local CPU, for example with AVX-512:
+
+```bash
+FFLAGS="-O3 -march=native -mprefer-vector-width=512" pip install --no-cache-dir .
+```
+
+The unweighted angular pair counts run about twice as fast with this build (see `docs/performance.md`, "Unweighted angular pair counts").
+To try them on your own data and random catalogs, see `docs/installation.md`, "Try the faster angular pair counts".
+
 ## Supported input catalogs
 
 The public APIs accept several tabular backends as long as the required columns are present:

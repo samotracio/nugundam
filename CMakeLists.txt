@@ -59,4 +59,13 @@ target_link_libraries(${module_name} PRIVATE
   OpenMP::OpenMP_Fortran
 )
 
+# th_A_grp/th_C_grp must give exactly the same counts as th_A/th_C. A fused
+# multiply-add rounds differently and could move a pair lying on a bin edge, so
+# contraction is disabled, also when FFLAGS adds -march=native. This changes
+# nothing on x86-64 with default flags.
+if(CMAKE_Fortran_COMPILER_ID STREQUAL "GNU")
+  target_compile_options(${module_name} PRIVATE
+    $<$<COMPILE_LANGUAGE:Fortran>:-ffp-contract=off>)
+endif()
+
 install(TARGETS ${module_name} DESTINATION nugundam)

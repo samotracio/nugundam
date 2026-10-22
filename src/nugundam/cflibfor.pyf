@@ -43,6 +43,19 @@ python module _cflibfor ! in
                 real(kind=8) intent(out),dimension(nsep),depend(nsep) :: aa
             end subroutine th_A
 
+            subroutine th_A_grp(nt,npt,ra,dec,x,y,z,nsep,sep,sbound,mxh1,mxh2,gmax,cntid,logf,progressf,sk,ll,aa) ! in :cflibfor:cflibfor.f90:mod
+                integer :: npt,nt,nsep,mxh1,mxh2,gmax
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,x,y,z
+                real(kind=8) dimension(nsep + 1),depend(nsep) :: sep
+                real(kind=8) :: sbound(4)
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh2,mxh1),depend(mxh2,mxh1) :: sk
+                integer dimension(npt),depend(npt) :: ll
+                real(kind=8) intent(out),dimension(nsep),depend(nsep) :: aa
+            end subroutine th_A_grp
+
             subroutine th_A_wg(nt,npt,dec,wei,x,y,z,nsep,sep,sbound,mxh1,mxh2,wfib,cntid,logf,progressf,sk,ll,aa) ! in :cflibfor:cflibfor.f90:mod
                 integer :: npt,nt,nsep,mxh1,mxh2,wfib
                 real(kind=8) dimension(npt),depend(npt) :: dec,x,y,z
@@ -101,6 +114,20 @@ python module _cflibfor ! in
                 integer dimension(npt1),depend(npt1) :: ll1
                 real(kind=8) intent(out),dimension(nsep),depend(nsep) :: cdth
             end subroutine th_C
+
+            subroutine th_C_grp(nt,npt,ra,dec,x,y,z,npt1,x1,y1,z1,nsep,sep,sbound,mxh1,mxh2,gmax,cntid,logf,progressf,sk1,ll1,cdth) ! in :cflibfor:cflibfor.f90:mod
+                integer :: nt,npt,npt1,mxh1,mxh2,nsep,gmax
+                real(kind=8) dimension(npt),depend(npt) :: ra,dec,x,y,z
+                real(kind=8) dimension(npt1),depend(npt1) :: x1,y1,z1
+                real(kind=8) dimension(nsep + 1),depend(nsep) :: sep
+                real(kind=8) dimension(4) :: sbound
+                character*32 :: cntid
+                character*80 :: logf
+                character*512 :: progressf
+                integer dimension(mxh2,mxh1),depend(mxh2,mxh1) :: sk1
+                integer dimension(npt1),depend(npt1) :: ll1
+                real(kind=8) intent(out),dimension(nsep),depend(nsep) :: cdth
+            end subroutine th_C_grp
 
             subroutine th_C_wg(nt,npt,ra,dec,wei,x,y,z,npt1,wei,x1,y1,z1,nsep,sep,sbound,mxh1,mxh2,wfib,cntid,logf,progressf,sk1,ll1,cdth) ! in :cflibfor:cflibfor.f90:mod
                 integer :: nt,npt,npt1,mxh1,mxh2,nsep,wfib
