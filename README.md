@@ -1025,3 +1025,9 @@ Low-level auxiliary functions are also available:
 
 The function `plot_compare_ratio` builds a two-panel comparison plot with shared axes,
 which supports several correlation curves on top and multiple curve ratios below.
+
+
+Code of Conduct
+---------------
+This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
+All contributors and participants are expected to adhere to these guidelines.
